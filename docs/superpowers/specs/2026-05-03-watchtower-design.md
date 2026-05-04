@@ -53,9 +53,9 @@ Single Pi 5 (16GB) + Hailo-8L AI HAT, all state in SQLite, dashboard over Tailsc
 
 ```
 HARDWARE          Pi 5 16GB · Hailo-8L AI HAT
-                  Built-in BLE 5.0 · USB WiFi (monitor) · 2× HackRF One
+                  Built-in BLE 5.0 · USB WiFi (monitor) · 2× RTL-SDR (RTL2832U)
 
-CAPTURE           ble_scanner · wifi_scanner · subghz_scanner · highband_scanner
+CAPTURE           ble_scanner · wifi_scanner · subghz_scanner · midband_scanner
                   → uniform Event envelope on local bus
 
 ENRICHMENT        device_resolver: probabilistic entity tracking
@@ -82,12 +82,14 @@ The bus is in-process Python (multiprocessing.Queue or ZeroMQ inproc — TBD at 
 |---------|----------|---------------|
 | `ble_scanner` | Pi 5 built-in BLE 5.0 | `ble_adv`, `ble_scan_response` |
 | `wifi_scanner` | USB WiFi adapter, monitor mode | `wifi_probe_request`, `wifi_assoc_request`, `wifi_beacon_seen` |
-| `subghz_scanner` | HackRF #1, fixed 24–960 MHz | `keyfob_emission`, `garage_emission`, `unknown_subghz_burst`, `walkietalkie_emission`, `subghz_protocol_decoded` |
-| `highband_scanner` | HackRF #2, fixed 700 MHz – 6 GHz | `cellular_band_energy`, `spectrum_anomaly_2g4`, `spectrum_anomaly_5g`, `lora_emission`, `frs_gmrs_emission` |
+| `subghz_scanner` | RTL-SDR #1 (RTL2832U), fixed 24–960 MHz | `keyfob_emission`, `garage_emission`, `unknown_subghz_burst`, `walkietalkie_emission`, `subghz_protocol_decoded` |
+| `midband_scanner` | RTL-SDR #2 (RTL2832U), fixed 960 MHz – 1.7 GHz | `cellular_band_energy_low_mid`, `lora_emission_915`, `aviation_band_energy` |
 
-**Why fixed-assignment HackRFs** rather than one sweeping radio: time-slicing across 24 MHz–6 GHz misses sub-second events on whichever band is currently off-air. Two radios on dedicated bands = continuous coverage, no missed events.
+**Why fixed-assignment RTL-SDRs** rather than one sweeping radio: time-slicing across 24 MHz–1.7 GHz misses sub-second events on whichever band is currently off-air (key-fob bursts especially). Two radios on dedicated bands = continuous coverage, no missed events.
 
-**Why a dedicated USB WiFi adapter** rather than HackRF for WiFi: HackRF lacks the baseband processing for reliable WiFi monitor mode; purpose-built adapters do this well. Same logic for keeping built-in BLE.
+**Why a dedicated USB WiFi adapter** rather than relying solely on built-in WiFi: built-in WiFi monitor mode on Pi 5 is unreliable; purpose-built USB adapters (e.g., Alfa AWUS036ACS) handle monitor mode well. Built-in BLE is kept for Bluetooth.
+
+**Hardware coverage limitations of RTL-SDR vs HackRF (acknowledged):** RTL-SDR cannot directly survey 2.4 GHz (BLE/WiFi already covered by dedicated radios) or 5 GHz, and only catches the lower cellular bands (700/800/900 MHz LTE) — high-band cellular (1800/2100/2600 MHz) is out of range. For this threat model these losses are negligible: BLE/WiFi capture is the right tool for 2.4 GHz device tracking, and cellular Tier-1 detection works on whichever bands are accessible (carrier-dependent). A future HackRF upgrade is a drop-in replacement at the scanner abstraction.
 
 ### Event envelope (uniform across all scanners)
 
@@ -515,12 +517,14 @@ All defaults at maximum privacy:
 | Hailo-8L AI HAT | $70 |
 | 256GB A2 microSD | $30 |
 | USB WiFi adapter (Alfa AWUS036ACS or equivalent) | $15 |
-| HackRF One #1 (sub-GHz fixed) | $300 |
-| HackRF One #2 (highband fixed) | $300 |
-| Powered USB 3 hub (7-port, 60W) — *required* for radio power budget | $30 |
-| Antennas (telescoping for HackRFs, high-gain for BLE/WiFi) | $40 |
-| Enclosure with airflow / case fan — *required* (HackRFs run hot) | $30 |
-| **Total v1** | **~$935** |
+| RTL-SDR Blog v3 #1 (sub-GHz fixed) | $35 |
+| RTL-SDR Blog v3 #2 (mid-band fixed) | $35 |
+| Powered USB 3 hub (recommended for radio + WiFi adapter power budget) | $30 |
+| Antennas (telescoping for RTL-SDRs, high-gain for BLE/WiFi) | $40 |
+| Enclosure with airflow | $30 |
+| **Total v1** | **~$405** |
+
+**Future hardware upgrade path:** swapping to 2× HackRF One (~$600 incremental) extends band coverage to 6 GHz, enabling 2.4/5 GHz spectrum survey and full LTE band coverage. Drop-in at the scanner abstraction; no design changes required.
 
 ### Deferred (v1.5 / v2)
 

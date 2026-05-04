@@ -444,7 +444,6 @@ function watchtower() {
       const samples = this.spectrum?.midband_samples || [];
       if (!samples.length) return [];
       const byBand = {};
-      // samples are returned newest-first; reverse to chronological
       const ordered = samples.slice().reverse();
       for (const s of ordered) {
         if (!byBand[s.band]) byBand[s.band] = [];
@@ -458,7 +457,6 @@ function watchtower() {
         const hi = Math.max(...energies, -50);
         const range = Math.max(1, hi - lo);
         const last = energies[energies.length - 1];
-        // SVG polyline: x = index, y = 100*(1 - (e - lo)/range)
         const linePts = points.map((p, i) => `${i},${(100 * (1 - (p.energy_dbm - lo) / range)).toFixed(1)}`).join(' ');
         const polyPts = `0,100 ${linePts} ${points.length - 1},100`;
         const freq_label = points[points.length - 1].freq_hz
@@ -467,17 +465,43 @@ function watchtower() {
         out.push({
           band,
           label: this.bandLabel(band),
-          last,
+          last, lo, hi,
           points,
           freq_label,
           svgLine: linePts,
           svgPolygon: polyPts,
         });
       }
-      // Sort: cellular first, then ISM, then GPS
       const order = ['700MHz','850MHz','GSM900','900MHz','AviationBand','GPS-L1','OutOfBand'];
       out.sort((a,b) => order.indexOf(a.band) - order.indexOf(b.band));
       return out;
+    },
+
+    spectrumCellColor(e, lo, hi) {
+      const range = Math.max(1, hi - lo);
+      const t = Math.max(0, Math.min(1, (e - lo) / range));
+      // 0 = #1f2740 (cold)
+      // 0.33 = #5dd0a8 (calm green)
+      // 0.66 = #f6c453 (warm gold)
+      // 1 = #ff5470 (hot red)
+      const stops = [
+        [0,    [31, 39, 64]],
+        [0.33, [93, 208, 168]],
+        [0.66, [246, 196, 83]],
+        [1,    [255, 84, 112]],
+      ];
+      for (let i = 0; i < stops.length - 1; i++) {
+        const [s0, c0] = stops[i];
+        const [s1, c1] = stops[i+1];
+        if (t >= s0 && t <= s1) {
+          const k = (t - s0) / (s1 - s0);
+          const r = Math.round(c0[0] + (c1[0] - c0[0]) * k);
+          const g = Math.round(c0[1] + (c1[1] - c0[1]) * k);
+          const b = Math.round(c0[2] + (c1[2] - c0[2]) * k);
+          return `rgb(${r},${g},${b})`;
+        }
+      }
+      return 'rgb(31,39,64)';
     },
 
     bandLabel(band) {

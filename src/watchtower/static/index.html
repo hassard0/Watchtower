@@ -415,6 +415,33 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- Waterfall heatmap -->
+      <div class="glass rounded-2xl p-4 mb-3" x-show="spectrumBands.length > 0">
+        <div class="flex items-baseline justify-between mb-2">
+          <div class="text-[10px] uppercase tracking-widest text-slate-500">Waterfall · last 5 min</div>
+          <div class="text-[10px] text-slate-600 num">low energy ← → high energy</div>
+        </div>
+        <div class="space-y-1">
+          <template x-for="b in spectrumBands" :key="'wf-'+b.band">
+            <div class="flex items-center gap-2">
+              <div class="w-20 text-[10px] num text-right text-slate-400 truncate" x-text="b.band"></div>
+              <div class="flex-1 flex gap-px h-5 rounded-sm overflow-hidden">
+                <template x-for="(p, i) in b.points" :key="i">
+                  <div class="flex-1 transition" :style="`background: ${spectrumCellColor(p.energy_dbm, b.lo, b.hi)};`"
+                       :title="`${formatTime(p.ts_unix)} · ${p.energy_dbm.toFixed(1)} dBm`"></div>
+                </template>
+              </div>
+              <div class="w-12 text-[10px] num text-slate-500 text-right" x-text="b.last.toFixed(1)+'dBm'"></div>
+            </div>
+          </template>
+        </div>
+        <div class="mt-2 flex items-center gap-2 text-[10px] text-slate-600">
+          <span>oldest</span>
+          <div class="flex-1 h-1.5 rounded-full" style="background: linear-gradient(to right, #1f2740, #5dd0a8, #f6c453, #ff5470)"></div>
+          <span>now</span>
+        </div>
+      </div>
+
       <!-- Per-band rolling sparklines -->
       <div class="glass rounded-2xl p-4 space-y-3">
         <template x-for="b in spectrumBands" :key="b.band">

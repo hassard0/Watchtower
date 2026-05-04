@@ -9,6 +9,8 @@ function watchtower() {
     discoveryProbing: {},
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
+    findmyData: { observers: [], distinct_count: 0, by_status: {}, daily_presence: [] },
+    findmyWindowSec: 300,
     zones: [],
     // Per-tab loading state. true while fetching.
     tabLoading: {},
@@ -37,6 +39,7 @@ function watchtower() {
       { id: 'entities',  label: 'Entities',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="11" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M14 21v-2a3 3 0 0 1 3-3h2"/></svg>' },
       { id: 'timeline',  label: 'Timeline',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="3" rx="1"/><rect x="6" y="11" width="12" height="3" rx="1"/><rect x="3" y="16" width="14" height="3" rx="1"/></svg>' },
       { id: 'spectrum',  label: 'Spectrum',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h2l3-9 6 18 3-9h6"/></svg>' },
+      { id: 'findmy',    label: 'Find-My',   icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>' },
       { id: 'zones',     label: 'Zones',     icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
       { id: 'alerts',    label: 'Alerts',    icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>' },
       { id: 'settings',  label: 'Settings',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' },
@@ -96,6 +99,7 @@ function watchtower() {
         if (tab === 'spectrum')  tasks.push(this.loadSpectrum());
         if (tab === 'zones')     tasks.push(this.loadZones());
         if (tab === 'discover')  tasks.push(this.loadDiscovery());
+        if (tab === 'findmy')    tasks.push(this.loadFindmy());
         if (tab === 'overview')  tasks.push(this.loadRecap());
         if (tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
         await Promise.all(tasks);
@@ -219,6 +223,14 @@ function watchtower() {
         this.visits = j.visits || [];
         this.tabsLoaded = { ...this.tabsLoaded, timeline: true };
       } catch (e) { console.warn('loadTimeline', e); }
+    },
+
+    async loadFindmy() {
+      try {
+        const r = await fetch(`/api/findmy/observers?window=${this.findmyWindowSec}`);
+        this.findmyData = await r.json();
+        this.tabsLoaded = { ...this.tabsLoaded, findmy: true };
+      } catch (e) { console.warn('loadFindmy', e); }
     },
 
     async loadSpectrum() {
@@ -815,6 +827,16 @@ function watchtower() {
         'untrusted': 'bg-threat/15 text-threat',
       })[c] || 'bg-slate-500/15 text-slate-400';
     },
+    findmyStatusClass(status) {
+      return ({
+        'owned':       'bg-signal-pulse/20 text-signal-pulse',
+        'unowned':     'bg-threat/20 text-threat',
+        'separated':   'bg-signal-warm/20 text-signal-warm',
+        'lost-mode':   'bg-signal-warm/20 text-signal-warm',
+        'unowned-paired': 'bg-signal-deep/20 text-signal-deep',
+      })[status] || 'bg-slate-700/40 text-slate-400';
+    },
+
     classificationDot(c) {
       return ({
         'anchor': 'bg-anchor', 'satellite': 'bg-satellite', 'known_guest': 'bg-guest', 'untrusted': 'bg-threat',

@@ -673,6 +673,143 @@ tailwind.config = {
     </section>
 
     <!-- =================================================================== -->
+    <!-- TAB: FIND-MY                                                          -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'findmy'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-5">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-signal-deep to-signal-glow flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>
+          </div>
+          <div class="flex-1">
+            <div class="text-base font-semibold">Find-My listener</div>
+            <div class="text-[11px] text-slate-500">Apple Find-My broadcasts in range right now (AirTags, Find-My-enabled accessories, lost AirPods).</div>
+          </div>
+          <div class="flex items-center gap-1">
+            <template x-for="w in [{s:60,l:'1m'},{s:300,l:'5m'},{s:900,l:'15m'}]" :key="w.s">
+              <button class="seg-btn px-2 py-1 rounded text-[10px] uppercase tracking-wider border border-ink-600/40 text-slate-400"
+                      :data-active="findmyWindowSec === w.s"
+                      @click="findmyWindowSec = w.s; loadFindmy()">
+                <span x-text="w.l"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <!-- summary cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Distinct trackers</div>
+            <div class="text-2xl num font-bold text-signal-glow" x-text="findmyData.distinct_count ?? 0"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Owned (with owner nearby)</div>
+            <div class="text-2xl num font-bold text-signal-pulse" x-text="findmyData.by_status?.owned ?? 0"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Separated/lost-mode</div>
+            <div class="text-2xl num font-bold text-signal-warm" x-text="(findmyData.by_status?.separated ?? 0) + (findmyData.by_status?.['lost-mode'] ?? 0)"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Unowned</div>
+            <div class="text-2xl num font-bold" :class="(findmyData.by_status?.unowned ?? 0) > 0 ? 'text-threat' : 'text-slate-500'" x-text="findmyData.by_status?.unowned ?? 0"></div>
+          </div>
+        </div>
+        <div class="mt-2 text-[10px] text-slate-500">
+          <span class="font-semibold text-slate-400">Note:</span> Apple rotates Find-My keys ~every 15 min so a tracker can show up under multiple addresses across windows. Within a single short window each row ≈ a distinct tracker.
+        </div>
+      </div>
+
+      <!-- skeleton on first load -->
+      <div x-show="tabLoading.findmy && !tabsLoaded.findmy" class="glass rounded-2xl p-4 space-y-2">
+        <template x-for="i in 6" :key="i">
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 rounded-full skeleton"></div>
+            <div class="w-32 h-3 skeleton"></div>
+            <div class="flex-1 h-3 skeleton"></div>
+            <div class="w-16 h-3 skeleton"></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- live tracker list -->
+      <div class="glass rounded-2xl overflow-hidden" x-show="(findmyData.observers || []).length > 0">
+        <div class="px-4 py-2.5 border-b border-ink-600/40 flex items-baseline justify-between">
+          <div class="text-[10px] uppercase tracking-widest text-slate-500">In range — last <span x-text="findmyWindowSec >= 60 ? Math.round(findmyWindowSec/60) + ' min' : findmyWindowSec + 's'"></span></div>
+          <div class="text-[10px] text-slate-500">closest first</div>
+        </div>
+        <table class="w-full text-sm">
+          <thead class="text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-600/40">
+            <tr>
+              <th class="text-left px-4 py-2 font-medium">Rotating MAC</th>
+              <th class="text-left px-2 py-2 font-medium">Status</th>
+              <th class="text-right px-2 py-2 font-medium">RSSI</th>
+              <th class="text-right px-2 py-2 font-medium">Sightings</th>
+              <th class="text-right px-4 py-2 font-medium">First seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="o in findmyData.observers" :key="o.rotating_mac">
+              <tr class="border-b border-ink-600/20 hover:bg-ink-700/30 transition">
+                <td class="px-4 py-2.5 font-mono text-xs">
+                  <div class="flex items-center gap-2">
+                    <div class="w-1.5 h-1.5 rounded-full"
+                         :class="(Math.floor(Date.now()/1000) - o.last_seen_unix) < 30 ? 'bg-signal-pulse animate-pulse' : 'bg-slate-700'"></div>
+                    <span x-text="o.rotating_mac"></span>
+                  </div>
+                </td>
+                <td class="px-2 py-2.5">
+                  <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded"
+                        :class="findmyStatusClass(o.status)"
+                        x-text="o.status || '—'"></span>
+                </td>
+                <td class="px-2 py-2.5 text-right num text-slate-300" x-text="(o.max_rssi != null ? o.max_rssi : '—') + ' dBm'"></td>
+                <td class="px-2 py-2.5 text-right num text-slate-400" x-text="o.sightings"></td>
+                <td class="px-4 py-2.5 text-right num text-[11px] text-slate-500" x-text="relTime(o.first_seen_unix)"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- empty -->
+      <div x-show="!tabLoading.findmy && tabsLoaded.findmy && (findmyData.observers || []).length === 0"
+           class="glass rounded-2xl p-12 text-center">
+        <div class="text-5xl mb-2 opacity-40">🔎</div>
+        <div class="text-sm font-semibold mb-1">No Find-My broadcasts in window</div>
+        <div class="text-[11px] text-slate-500 max-w-md mx-auto">
+          Try a longer window, or wait — AirTags broadcast every ~2 sec when nearby; iPhones+AirPods broadcast Find-My when they've been disconnected from owner recently.
+        </div>
+      </div>
+
+      <!-- daily presence chart -->
+      <div class="glass rounded-2xl p-5" x-show="(findmyData.daily_presence || []).length > 0">
+        <div class="flex items-baseline justify-between mb-2">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Daily presence — last 7 days</div>
+            <div class="text-sm">minutes of Find-My activity per day · spikes = persistent tracker</div>
+          </div>
+        </div>
+        <div class="space-y-1.5">
+          <template x-for="d in findmyData.daily_presence" :key="d.day">
+            <div class="flex items-center gap-2 text-xs">
+              <span class="w-24 text-slate-400 num" x-text="d.day"></span>
+              <div class="flex-1 h-3 rounded-full bg-ink-700/50 overflow-hidden">
+                <div class="h-full rounded-full transition-all"
+                     :class="d.minutes_with_findmy >= 180 ? 'bg-gradient-to-r from-signal-warm to-threat' : 'bg-gradient-to-r from-signal-pulse to-signal-glow'"
+                     :style="`width: ${Math.min(100, (d.minutes_with_findmy / 1440) * 100)}%`"></div>
+              </div>
+              <span class="num text-slate-400 w-16 text-right" x-text="d.minutes_with_findmy + ' min'"></span>
+            </div>
+          </template>
+        </div>
+        <div class="mt-3 text-[10px] text-slate-500">
+          The <span class="text-signal-warm font-semibold">warm-orange</span> bars are days with ≥ 180 min of Find-My activity. Three consecutive warm days fires the persistent-tracker rule.
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
     <!-- TAB: ZONES                                                            -->
     <!-- =================================================================== -->
     <section x-show="tab === 'zones'" class="animate-fade-in space-y-3">

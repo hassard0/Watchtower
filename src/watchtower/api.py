@@ -94,6 +94,8 @@ class ApiServer:
         self._app.router.add_get("/api/spectrum", self.spectrum)
         # Find-My tracker (OpenHaystack mode)
         self._app.router.add_get("/api/findmy/tracker", self.findmy_tracker_status)
+        # Find-My listener — live view of nearby AirTag/Find-My broadcasts
+        self._app.router.add_get("/api/findmy/observers", self.findmy_observers)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
@@ -991,6 +993,81 @@ class ApiServer:
         })
 
     # ---- FIND-MY TRACKER ----
+
+    async def findmy_observers(self, request: web.Request) -> web.Response:
+        """Live snapshot of nearby Find-My broadcasts.
+
+        For each rotating BLE address that emitted a Find-My advertisement in
+        the configured window, returns the most-recent state, RSSI, sighting
+        count, status nibble, and decoded ownership. Each *distinct* rotating
+        address is approximately a distinct tracker (Apple keys rotate every
+        ~15 min so a 5-min window mostly captures one slot per tracker).
+        """
+        from watchtower.apple_continuity import decode_continuity, short_state_summary
+        window = max(10, min(900, int(request.query.get("window", "300"))))
+        now = int(time.time())
+        with get_connection(self._db) as conn:
+            rows = conn.execute("""
+                SELECT lower(json_extract(features_json, '$.mac')) AS mac,
+                       MAX(json_extract(features_json, '$.manufacturer_data_hex')) AS mfr,
+                       MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS max_rssi,
+                       AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
+                       MIN(ts_unix) AS first_seen,
+                       MAX(ts_unix) AS last_seen,
+                       COUNT(*) AS sightings
+                FROM raw_events
+                WHERE scanner = 'ble_scanner'
+                  AND ts_unix > ?
+                  AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                GROUP BY mac
+                ORDER BY max_rssi DESC NULLS LAST
+                LIMIT 100
+            """, (now - window,)).fetchall()
+            observers = []
+            for mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings in rows:
+                decoded = decode_continuity(mfr or "")
+                observers.append({
+                    "rotating_mac": mac,
+                    "max_rssi": max_rssi,
+                    "avg_rssi": round(avg_rssi, 1) if avg_rssi is not None else None,
+                    "first_seen_unix": first_seen,
+                    "last_seen_unix": last_seen,
+                    "sightings": sightings,
+                    "status": (decoded or {}).get("status"),
+                    "maintained": (decoded or {}).get("maintained"),
+                    "summary": short_state_summary(decoded) if decoded else "",
+                })
+
+            # Daily presence pattern (last 7 days), same query the rule uses.
+            day_rows = conn.execute("""
+                WITH minute_buckets AS (
+                    SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
+                           CAST(ts_unix / 60 AS INTEGER) AS bucket
+                    FROM raw_events
+                    WHERE scanner = 'ble_scanner'
+                      AND ts_unix > strftime('%s','now') - 7 * 86400
+                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                    GROUP BY day, bucket
+                )
+                SELECT day, COUNT(*) AS minutes_with_findmy
+                FROM minute_buckets GROUP BY day ORDER BY day DESC
+            """).fetchall()
+            daily = [{"day": d, "minutes_with_findmy": m} for d, m in day_rows]
+
+        # Group observers by status nibble for quick "owned vs unowned" counts.
+        by_status: dict[str, int] = {}
+        for o in observers:
+            key = o.get("status") or "unknown"
+            by_status[key] = by_status.get(key, 0) + 1
+
+        return web.json_response({
+            "ts_unix": now,
+            "window_sec": window,
+            "distinct_count": len(observers),
+            "by_status": by_status,
+            "observers": observers,
+            "daily_presence": daily,
+        })
 
     async def findmy_tracker_status(self, request: web.Request) -> web.Response:
         if self._findmy_tracker is None:

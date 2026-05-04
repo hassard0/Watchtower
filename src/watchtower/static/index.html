@@ -382,6 +382,7 @@ tailwind.config = {
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-medium" x-text="entityDisplayName(c)"></span>
                 <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(c.kind)" x-text="c.kind?.replace(/_/g,' ')"></span>
+                <span x-show="c.on_home_wifi" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/20 text-signal-glow border border-signal-glow/40">on home wi-fi</span>
               </div>
               <div class="text-[10px] text-slate-500 num truncate" x-text="`${c.total_observations.toLocaleString()} obs · ${c.visit_count} visits · ${Math.round((c.regularity || 0) * 100)}% regular · ${relTime(c.last_seen_unix)}`"></div>
             </div>

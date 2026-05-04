@@ -56,7 +56,14 @@ function watchtower() {
 
     // ---- INIT ----
     init() {
-      this.refresh();
+      this.refresh().then(() => {
+        // First-run: if there are no anchors, auto-route to Discover so the user
+        // lands directly on enrollment.
+        if (this.state.any_anchor_enrolled === false && this.tab === 'overview') {
+          // Keep Overview but flag the SETUP nudge (already there). Could also
+          // auto-switch — leaving on Overview so the user sees the situation.
+        }
+      });
       setInterval(() => { this.tick(); }, 1000);
       setInterval(() => { this.refresh(); }, 5000);
     },

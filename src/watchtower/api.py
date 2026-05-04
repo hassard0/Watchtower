@@ -31,6 +31,32 @@ def _row_to_dict(cursor, row) -> dict[str, Any]:
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 
 
+def _read_lan_macs() -> set[str]:
+    """Return MACs of devices visible on the LAN via /proc/net/arp.
+
+    Pi's wlan0 connects to the user's home AP, so the ARP table contains
+    other clients on the same LAN — typically phones, tablets, laptops,
+    smart-home hubs. These are very strong anchor/satellite candidates.
+    """
+    out: set[str] = set()
+    try:
+        with open("/proc/net/arp", "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i == 0:  # header
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                mac = parts[3].lower()
+                if mac == "00:00:00:00:00:00":
+                    continue
+                if ":" in mac and len(mac) == 17:
+                    out.add(mac)
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def _hour_of_week_label(hw: int) -> str:
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return f"{days[hw // 24]} {hw % 24:02d}:00"
@@ -696,26 +722,37 @@ class ApiServer:
                 SELECT entity_id, scanner, kind, friendly_name, vendor,
                        first_seen_unix, last_seen_unix,
                        visit_count, total_observations,
-                       avg_rssi, regularity, anomaly_score
+                       avg_rssi, regularity, anomaly_score, is_random_mac
                 FROM entities
                 WHERE classification IS NULL
                   AND total_observations >= 50
                   AND last_seen_unix > ?
                 ORDER BY total_observations DESC
-                LIMIT 50
+                LIMIT 100
             """, (now - 7 * 86400,))
             candidates = [_row_to_dict(cursor, r) for r in cursor.fetchall()]
-        # Rank: stable named devices > apple-grouped > everything else
+
+        lan_macs = _read_lan_macs()
         for c in candidates:
             score = c.get("total_observations", 0) / 100
             if c.get("friendly_name"):
                 score += 5
-            if c.get("entity_id", "").startswith("ble:mac:"):
+            eid = c.get("entity_id", "")
+            on_lan = False
+            if eid.startswith("ble:mac:"):
                 score += 3
-            elif c.get("entity_id", "").startswith("ble:named:"):
+                if eid[8:].lower() in lan_macs:
+                    score += 20  # huge boost: this device is on your home WiFi
+                    on_lan = True
+            elif eid.startswith("ble:named:"):
                 score += 4
-            elif c.get("entity_id", "").startswith("ble:apple:"):
+            elif eid.startswith("ble:apple:"):
                 score += 2
+            elif eid.startswith("wifi:mac:"):
+                if eid[9:].lower() in lan_macs:
+                    score += 15
+                    on_lan = True
+            c["on_home_wifi"] = on_lan
             c["candidacy_score"] = score
         candidates.sort(key=lambda c: c["candidacy_score"], reverse=True)
-        return web.json_response({"candidates": candidates[:30]})
+        return web.json_response({"candidates": candidates[:30], "lan_macs": list(lan_macs)})

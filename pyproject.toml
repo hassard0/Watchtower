@@ -14,6 +14,7 @@ dependencies = [
     "click>=8.1",
     "numpy>=1.26",
     "typing-extensions>=4.0",
+    "aiohttp>=3.9",
 ]
 
 [project.scripts]
@@ -43,3 +44,5 @@ packages = ["src/watchtower"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/watchtower/storage/schema.sql" = "watchtower/storage/schema.sql"
+"src/watchtower/static/index.html" = "watchtower/static/index.html"
+"src/watchtower/static/assets/app.js" = "watchtower/static/assets/app.js"

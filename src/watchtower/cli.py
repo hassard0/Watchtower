@@ -8,6 +8,8 @@ from pathlib import Path
 
 import click
 
+from watchtower.analytics import Analytics
+from watchtower.api import ApiServer
 from watchtower.bus import Bus
 from watchtower.config import load_config
 from watchtower.logging_setup import setup_logging
@@ -95,7 +97,11 @@ async def _run_async(config_path: Path) -> None:
             signal.signal(s, lambda *a: stop.set())
 
     pruner_task = asyncio.create_task(_pruner_loop(stop, cfg.storage.db_path, cfg.storage.retention_days))
+    analytics_task = asyncio.create_task(_analytics_loop(stop, cfg.storage.db_path))
     scanner_tasks = [asyncio.create_task(s.start()) for s in scanners]
+
+    api = ApiServer(cfg.storage.db_path, host="0.0.0.0", port=8080)
+    await api.start()
 
     await stop.wait()
     log.info("watchtower stopping scanners…")
@@ -103,11 +109,13 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
-    pruner_task.cancel()
-    try:
-        await pruner_task
-    except asyncio.CancelledError:
-        pass
+    for t in (pruner_task, analytics_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    await api.stop()
     await sink.stop()
     await bus.shutdown()
     log.info("watchtower stopped")
@@ -125,6 +133,24 @@ async def _pruner_loop(stop: asyncio.Event, db_path: str, retention_days: int) -
                 log.info("pruner deleted %d events", n)
         except Exception:  # noqa: BLE001
             log.exception("pruner failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _analytics_loop(stop: asyncio.Event, db_path: str) -> None:
+    """Roll up raw events into entities/visits/baseline/alerts every 30s."""
+    interval = 30
+    analytics = Analytics(db_path)
+    while not stop.is_set():
+        try:
+            summary = await asyncio.get_event_loop().run_in_executor(None, analytics.step)
+            if summary.get("processed"):
+                log.info("analytics: processed=%d entities_touched=%d",
+                         summary["processed"], summary["entities_touched"])
+        except Exception:  # noqa: BLE001
+            log.exception("analytics failed")
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:

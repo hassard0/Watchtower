@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1a">
+<title>Watchtower</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        ink: { 950: '#05070d', 900: '#0a0e1a', 800: '#0f1424', 700: '#161c2e', 600: '#1f2740', 500: '#2c3654' },
+        signal: { glow: '#00d9ff', pulse: '#00ff88', warm: '#ffb547', hot: '#ff5470', deep: '#7c3aed' },
+        anchor: '#f6c453',
+        satellite: '#5dd0a8',
+        guest: '#7dd3fc',
+        unknown: '#cbd5e1',
+        threat: '#ff5470',
+      },
+      fontFamily: {
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'],
+        display: ['Inter', 'ui-sans-serif', 'system-ui'],
+      },
+      animation: {
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'fade-in': 'fadeIn 0.3s ease-out',
+        'shimmer': 'shimmer 2s linear infinite',
+        'breathe': 'breathe 4s ease-in-out infinite',
+      },
+      keyframes: {
+        fadeIn: { '0%': { opacity: 0, transform: 'translateY(4px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } },
+        shimmer: { '0%': { backgroundPosition: '-200% 0' }, '100%': { backgroundPosition: '200% 0' } },
+        breathe: { '0%, 100%': { transform: 'scale(1)', opacity: 0.7 }, '50%': { transform: 'scale(1.05)', opacity: 1 } },
+      },
+    },
+  },
+};
+</script>
+<style>
+  html, body { background: #05070d; }
+  body { font-family: 'Inter', ui-sans-serif, system-ui; color: #e2e8f0; -webkit-font-smoothing: antialiased; }
+  .glass { background: rgba(15, 20, 36, 0.7); backdrop-filter: blur(20px) saturate(180%); border: 1px solid rgba(124, 58, 237, 0.08); }
+  .glass-strong { background: rgba(10, 14, 26, 0.85); backdrop-filter: blur(28px) saturate(180%); border: 1px solid rgba(124, 58, 237, 0.12); }
+  .neon-text { text-shadow: 0 0 20px rgba(0, 217, 255, 0.5); }
+  .grid-bg { background-image: radial-gradient(circle at 1px 1px, rgba(124, 58, 237, 0.12) 1px, transparent 0); background-size: 24px 24px; }
+  .scan-pulse { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); animation: scan-pulse 2s infinite; }
+  @keyframes scan-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); }
+    70% { box-shadow: 0 0 0 12px rgba(0, 255, 136, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+  }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  .scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.3); border-radius: 3px; }
+  .scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(124, 58, 237, 0.6); }
+  .cluster-ring { background: conic-gradient(from 0deg, #7c3aed 0deg, transparent 60deg, #7c3aed 360deg); animation: spin 8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .heat-gradient { background: linear-gradient(90deg, #5dd0a8 0%, #f6c453 50%, #ff5470 100%); }
+  .anomaly-ring { background: conic-gradient(from -90deg, var(--ring-color, #5dd0a8) 0deg, var(--ring-color) calc(var(--score, 0) * 360deg), #1f2740 calc(var(--score, 0) * 360deg)); }
+  .seg-btn { transition: all 0.15s; }
+  .seg-btn[data-active="true"] { background: rgba(124, 58, 237, 0.25); border-color: rgba(124, 58, 237, 0.5); color: #fff; }
+</style>
+</head>
+<body class="min-h-screen">
+<div class="grid-bg fixed inset-0 -z-10"></div>
+<div class="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-signal-deep to-transparent opacity-50"></div>
+
+<div x-data="watchtower()" x-init="init()" class="min-h-screen pb-24 md:pb-8">
+
+  <!-- TOP BAR -->
+  <header class="sticky top-0 z-30 glass-strong border-b border-ink-600/40">
+    <div class="max-w-screen-2xl mx-auto px-4 py-3 flex items-center gap-3">
+      <div class="flex items-center gap-2.5">
+        <div class="relative">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-signal-deep to-signal-glow flex items-center justify-center">
+            <svg viewBox="0 0 24 24" class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M12 4v3M12 17v3M4 12h3M17 12h3M6.34 6.34l2.12 2.12M15.54 15.54l2.12 2.12M6.34 17.66l2.12-2.12M15.54 8.46l2.12-2.12"/>
+            </svg>
+          </div>
+          <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full" :class="state.home_state === 'home' ? 'bg-signal-pulse scan-pulse' : 'bg-signal-warm'"></div>
+        </div>
+        <div>
+          <div class="text-sm font-semibold tracking-tight">Watchtower</div>
+          <div class="text-xs text-slate-400 num" x-text="now"></div>
+        </div>
+      </div>
+      <div class="flex-1"></div>
+      <div class="hidden md:flex items-center gap-2">
+        <span class="text-xs uppercase tracking-wider text-slate-400">State</span>
+        <span class="px-3 py-1 rounded-md text-xs font-bold uppercase border"
+              :class="state.home_state === 'home' ? 'border-signal-pulse/40 text-signal-pulse bg-signal-pulse/10' : 'border-signal-warm/40 text-signal-warm bg-signal-warm/10'"
+              x-text="state.home_state || 'unknown'"></span>
+      </div>
+      <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-ink-700/60 border border-ink-600/60">
+        <div class="w-1.5 h-1.5 rounded-full bg-signal-pulse animate-pulse"></div>
+        <span class="text-xs num text-slate-300" x-text="state.entities?.active_now + ' active'"></span>
+      </div>
+      <button @click="tab='alerts'" class="relative px-3 py-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-threat/40 transition">
+        <svg class="w-4 h-4 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+        <span class="text-xs num ml-1" x-text="state.alerts_unack_24h"></span>
+        <span class="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-threat" x-show="state.alerts_unack_24h > 0"></span>
+      </button>
+      <button @click="refresh()" class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition" :class="loading && 'animate-spin'">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+      </button>
+    </div>
+
+    <!-- TAB STRIP -->
+    <nav class="max-w-screen-2xl mx-auto px-4 pb-2 flex items-center gap-1 overflow-x-auto scrollbar">
+      <template x-for="t in tabs" :key="t.id">
+        <button @click="tab = t.id"
+                class="seg-btn whitespace-nowrap px-3 py-1.5 rounded-md text-xs font-medium border border-transparent text-slate-400 hover:text-slate-200"
+                :data-active="tab === t.id">
+          <span x-text="t.label"></span>
+          <span x-show="t.count != null" class="ml-1.5 num text-[10px] text-slate-500" x-text="'(' + (t.count ?? 0) + ')'"></span>
+        </button>
+      </template>
+    </nav>
+  </header>
+
+  <main class="max-w-screen-2xl mx-auto px-4 py-4 md:py-6">
+
+    <!-- =================================================================== -->
+    <!-- TAB: OVERVIEW                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'overview'" class="space-y-5 animate-fade-in">
+
+      <!-- HERO STATE PANEL -->
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+        <!-- Anomaly hero -->
+        <div class="glass-strong rounded-2xl p-5 md:col-span-7 relative overflow-hidden">
+          <div class="absolute inset-0 opacity-10 grid-bg"></div>
+          <div class="relative flex flex-col md:flex-row md:items-center gap-5">
+            <!-- Anomaly ring -->
+            <div class="flex-shrink-0 flex items-center justify-center">
+              <div class="relative w-32 h-32">
+                <div class="absolute inset-0 rounded-full anomaly-ring"
+                     :style="`--score: ${anomalyHeroScore}; --ring-color: ${heatColor(anomalyHeroScore)}`"></div>
+                <div class="absolute inset-2 rounded-full bg-ink-900 flex flex-col items-center justify-center">
+                  <div class="text-3xl font-bold num" x-text="state.entities?.anomalous_now ?? 0"></div>
+                  <div class="text-[10px] uppercase tracking-widest text-slate-500">anomalous</div>
+                </div>
+              </div>
+            </div>
+            <div class="flex-1">
+              <div class="text-xs uppercase tracking-widest text-slate-500 mb-1">Current state</div>
+              <div class="flex items-baseline gap-3">
+                <div class="text-4xl md:text-5xl font-bold tracking-tight">
+                  <span x-text="heroHeadline"></span>
+                </div>
+              </div>
+              <div class="mt-2 text-sm text-slate-400" x-text="heroSubline"></div>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-ink-700/50 border border-anchor/20">
+                  <span class="w-1.5 h-1.5 rounded-full bg-anchor"></span>
+                  <span class="text-xs num"><span x-text="state.entities?.anchors ?? 0"></span> anchor</span>
+                </div>
+                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-ink-700/50 border border-satellite/20">
+                  <span class="w-1.5 h-1.5 rounded-full bg-satellite"></span>
+                  <span class="text-xs num"><span x-text="state.entities?.satellites ?? 0"></span> satellite</span>
+                </div>
+                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-ink-700/50 border border-guest/20">
+                  <span class="w-1.5 h-1.5 rounded-full bg-guest"></span>
+                  <span class="text-xs num"><span x-text="state.entities?.known_guests ?? 0"></span> guests</span>
+                </div>
+                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-ink-700/50 border border-unknown/20">
+                  <span class="w-1.5 h-1.5 rounded-full bg-unknown/60"></span>
+                  <span class="text-xs num"><span x-text="state.entities?.unknown ?? 0"></span> unknown</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scanner health -->
+        <div class="glass-strong rounded-2xl p-5 md:col-span-5">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-xs uppercase tracking-widest text-slate-500">Scanners (last hour)</div>
+            <div class="text-[10px] text-slate-600 num" x-text="state.ts_unix ? '#' + state.ts_unix : ''"></div>
+          </div>
+          <div class="space-y-2.5">
+            <template x-for="s in scannerRows" :key="s.scanner">
+              <div class="flex items-center gap-3">
+                <div class="w-7 h-7 rounded-md flex items-center justify-center" :class="s.color + '/20'">
+                  <span x-html="s.icon"></span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline justify-between">
+                    <div class="text-sm font-medium" x-text="s.label"></div>
+                    <div class="text-sm font-semibold num" :class="s.events > 0 ? 'text-slate-200' : 'text-slate-600'" x-text="s.events.toLocaleString()"></div>
+                  </div>
+                  <div class="h-1 mt-1 rounded-full bg-ink-700 overflow-hidden">
+                    <div class="h-full rounded-full transition-all" :class="s.barColor"
+                         :style="`width: ${s.barPct}%`"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+          <div class="mt-4 pt-3 border-t border-ink-600/40 flex items-center justify-between text-[11px] text-slate-500">
+            <div>Baseline learning</div>
+            <div class="num" x-text="`${state.baseline_progress?.buckets_seen ?? 0} / ${state.baseline_progress?.max_buckets ?? 0} buckets`"></div>
+          </div>
+          <div class="h-1 mt-1 rounded-full bg-ink-700 overflow-hidden">
+            <div class="h-full rounded-full bg-gradient-to-r from-signal-deep via-signal-glow to-signal-pulse transition-all" :style="`width: ${baselineProgressPct}%`"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RF RADAR + ANOMALY TOP LIST -->
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+        <!-- Radar -->
+        <div class="glass rounded-2xl p-5 md:col-span-7 min-h-[360px]">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-slate-500">RF radar</div>
+              <div class="text-base font-semibold">Now in range</div>
+            </div>
+            <div class="text-[10px] text-slate-600">RSSI = distance, color = trust</div>
+          </div>
+          <div class="relative aspect-square max-w-[420px] mx-auto">
+            <!-- Range rings -->
+            <template x-for="r in [0.25, 0.5, 0.75, 1.0]" :key="r">
+              <div class="absolute inset-0 m-auto rounded-full border border-ink-600/60"
+                   :style="`width: ${r*100}%; height: ${r*100}%;`"></div>
+            </template>
+            <!-- Crosshair -->
+            <div class="absolute inset-0 m-auto w-px h-full bg-ink-600/30"></div>
+            <div class="absolute inset-0 m-auto w-full h-px bg-ink-600/30"></div>
+            <!-- Center pulse -->
+            <div class="absolute inset-0 m-auto w-3 h-3 rounded-full bg-signal-deep scan-pulse" style="top:48%; left:48%;"></div>
+            <!-- Dots -->
+            <template x-for="d in radarDots" :key="d.id">
+              <div class="absolute group" :style="`top:${50 + d.y}%; left:${50 + d.x}%; transform: translate(-50%,-50%);`">
+                <div class="w-2.5 h-2.5 rounded-full"
+                     :class="d.cls"
+                     :style="`box-shadow: 0 0 ${10 + d.glow*14}px ${d.shadow};`"></div>
+                <div class="opacity-0 group-hover:opacity-100 transition absolute left-3 top-0 z-20 px-2 py-1 rounded text-[10px] whitespace-nowrap glass border border-ink-600/60">
+                  <span x-text="d.label"></span>
+                  <span class="text-slate-500 ml-1 num" x-text="d.rssi + 'dBm'"></span>
+                </div>
+              </div>
+            </template>
+            <!-- Empty state -->
+            <div x-show="radarDots.length === 0" class="absolute inset-0 flex items-center justify-center text-xs text-slate-500">no signals</div>
+          </div>
+          <div class="mt-3 flex items-center justify-center gap-3 text-[10px] text-slate-500">
+            <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-anchor"></span>anchor</span>
+            <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-satellite"></span>satellite</span>
+            <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-guest"></span>guest</span>
+            <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-unknown/60"></span>unknown</span>
+            <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-threat"></span>anomalous</span>
+          </div>
+        </div>
+
+        <!-- Anomaly top list -->
+        <div class="glass rounded-2xl p-5 md:col-span-5">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-slate-500">Top anomalies</div>
+              <div class="text-base font-semibold">Most surprising right now</div>
+            </div>
+            <button @click="tab='entities'; entityScope='anomalous'" class="text-[10px] text-signal-glow hover:text-signal-pulse">view all →</button>
+          </div>
+          <div class="space-y-1 max-h-[360px] overflow-y-auto scrollbar">
+            <template x-for="e in topAnomalies" :key="e.entity_id">
+              <button @click="openEntity(e.entity_id)" class="w-full text-left flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-ink-700/50 transition group">
+                <div class="relative w-9 h-9 flex-shrink-0">
+                  <div class="absolute inset-0 rounded-full anomaly-ring"
+                       :style="`--score: ${e.anomaly_score || 0}; --ring-color: ${heatColor(e.anomaly_score || 0)}`"></div>
+                  <div class="absolute inset-1 rounded-full bg-ink-900 flex items-center justify-center text-[10px] num font-bold"
+                       :style="`color: ${heatColor(e.anomaly_score || 0)}`"
+                       x-text="Math.round((e.anomaly_score || 0) * 100)"></div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm font-medium truncate" x-text="entityDisplayName(e)"></span>
+                    <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(e.kind)" x-text="e.kind?.replace(/_/g,' ')"></span>
+                  </div>
+                  <div class="text-[10px] text-slate-500 num" x-text="entityMetaLine(e)"></div>
+                </div>
+                <div class="text-[10px] text-slate-500 group-hover:text-slate-300">→</div>
+              </button>
+            </template>
+            <div x-show="topAnomalies.length === 0" class="text-xs text-slate-500 text-center py-8">no anomalies right now — system is quiet</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ENTROPY / BASELINE STRIP -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500">Entropy of the room</div>
+            <div class="text-base font-semibold">Activity vs baseline (last 24h)</div>
+          </div>
+          <div class="text-[10px] text-slate-500">3-sigma envelope • per scanner</div>
+        </div>
+        <div class="space-y-3">
+          <template x-for="b in baselineRows" :key="b.feature">
+            <div>
+              <div class="flex items-baseline justify-between mb-1">
+                <div class="text-xs font-medium" x-text="b.label"></div>
+                <div class="text-[10px] text-slate-500 num">
+                  μ <span x-text="b.mean.toFixed(1)"></span>
+                  <span class="text-slate-700 mx-1">·</span>
+                  σ <span x-text="b.stddev.toFixed(1)"></span>
+                  <span class="text-slate-700 mx-1">·</span>
+                  n <span x-text="b.n"></span>
+                </div>
+              </div>
+              <div class="relative h-7 rounded-md overflow-hidden bg-ink-700/40">
+                <!-- baseline band -->
+                <div class="absolute inset-y-0 bg-signal-deep/15 border-l border-r border-signal-deep/30"
+                     :style="`left: ${b.bandLeft}%; right: ${b.bandRight}%;`"></div>
+                <!-- mean tick -->
+                <div class="absolute inset-y-0 w-px bg-signal-deep/60" :style="`left: ${b.meanPct}%;`"></div>
+                <!-- now marker -->
+                <div class="absolute inset-y-0 w-1 rounded" :class="b.zClass"
+                     :style="`left: calc(${b.nowPct}% - 2px);`"></div>
+                <!-- mini tick rail of values -->
+              </div>
+            </div>
+          </template>
+          <div x-show="baselineRows.length === 0" class="text-xs text-slate-500 text-center py-4">baseline accumulating — show real data after ~14 days</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: ENTITIES                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'entities'" class="animate-fade-in">
+      <div class="glass-strong rounded-2xl p-4 mb-3 flex flex-wrap items-center gap-2">
+        <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Filter</div>
+        <template x-for="s in scopeBtns" :key="s.id">
+          <button class="seg-btn px-3 py-1.5 rounded-md text-xs font-medium border border-ink-600/40 text-slate-400 hover:text-slate-200"
+                  :data-active="entityScope === s.id" @click="entityScope = s.id; loadEntities()">
+            <span x-text="s.label"></span>
+          </button>
+        </template>
+        <div class="flex-1"></div>
+        <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Sort</div>
+        <select x-model="entityOrder" @change="loadEntities()"
+                class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2.5 py-1.5 focus:outline-none focus:border-signal-glow/40">
+          <option value="active">most recent</option>
+          <option value="anomaly">anomaly score</option>
+          <option value="visits">most visits</option>
+          <option value="regular">most regular</option>
+          <option value="first_seen">newest</option>
+        </select>
+      </div>
+
+      <div class="glass rounded-2xl overflow-hidden">
+        <div class="overflow-x-auto scrollbar">
+          <table class="w-full text-sm">
+            <thead class="text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-600/40">
+              <tr>
+                <th class="text-left px-4 py-2.5 font-medium">Entity</th>
+                <th class="text-left px-2 py-2.5 font-medium hidden md:table-cell">Class</th>
+                <th class="text-left px-2 py-2.5 font-medium">Anomaly</th>
+                <th class="text-right px-2 py-2.5 font-medium">RSSI</th>
+                <th class="text-right px-2 py-2.5 font-medium hidden sm:table-cell">Visits</th>
+                <th class="text-right px-2 py-2.5 font-medium hidden md:table-cell">Regularity</th>
+                <th class="text-right px-4 py-2.5 font-medium">Seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="e in entities" :key="e.entity_id">
+                <tr @click="openEntity(e.entity_id)" class="border-b border-ink-600/20 hover:bg-ink-700/40 cursor-pointer transition">
+                  <td class="px-4 py-2.5">
+                    <div class="flex items-center gap-2.5">
+                      <div class="w-2 h-2 rounded-full flex-shrink-0"
+                           :class="e.currently_present ? 'bg-signal-pulse animate-pulse' : 'bg-slate-700'"></div>
+                      <div class="min-w-0">
+                        <div class="font-medium truncate flex items-center gap-1.5">
+                          <span x-text="entityDisplayName(e)"></span>
+                          <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(e.kind)" x-text="e.kind?.replace(/_/g,' ')"></span>
+                        </div>
+                        <div class="text-[10px] text-slate-500 truncate font-mono" x-text="e.entity_id"></div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="px-2 py-2.5 hidden md:table-cell">
+                    <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded"
+                          :class="classificationClass(e.classification)"
+                          x-text="e.classification || 'unknown'"></span>
+                  </td>
+                  <td class="px-2 py-2.5">
+                    <div class="flex items-center gap-2 min-w-[80px]">
+                      <div class="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
+                        <div class="h-full rounded-full" :style="`width: ${(e.anomaly_score || 0) * 100}%; background: ${heatColor(e.anomaly_score || 0)};`"></div>
+                      </div>
+                      <div class="text-[10px] num w-7 text-right" :style="`color: ${heatColor(e.anomaly_score || 0)};`"
+                           x-text="Math.round((e.anomaly_score || 0) * 100)"></div>
+                    </div>
+                  </td>
+                  <td class="px-2 py-2.5 text-right num text-slate-400" x-text="e.avg_rssi != null ? Math.round(e.avg_rssi) + ' dBm' : '—'"></td>
+                  <td class="px-2 py-2.5 text-right num text-slate-400 hidden sm:table-cell" x-text="e.visit_count ?? 0"></td>
+                  <td class="px-2 py-2.5 text-right hidden md:table-cell">
+                    <div class="flex items-center justify-end gap-1.5 min-w-[60px]">
+                      <div class="w-12 h-1 rounded-full bg-ink-700 overflow-hidden">
+                        <div class="h-full rounded-full bg-signal-glow" :style="`width: ${(e.regularity || 0) * 100}%`"></div>
+                      </div>
+                      <span class="text-[10px] num w-7 text-slate-500" x-text="Math.round((e.regularity || 0) * 100)"></span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-2.5 text-right num text-[11px] text-slate-500" x-text="relTime(e.last_seen_unix)"></td>
+                </tr>
+              </template>
+              <tr x-show="entities.length === 0">
+                <td colspan="7" class="text-xs text-slate-500 text-center py-12">no entities match this filter</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="px-4 py-2 text-[10px] text-slate-500 border-t border-ink-600/40 flex items-center justify-between">
+          <span><span x-text="entities.length"></span> shown · tap a row for detail</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: TIMELINE                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'timeline'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-4 flex flex-wrap items-center gap-2">
+        <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Window</div>
+        <template x-for="w in windowBtns" :key="w.h">
+          <button class="seg-btn px-3 py-1.5 rounded-md text-xs font-medium border border-ink-600/40 text-slate-400 hover:text-slate-200"
+                  :data-active="timelineHours === w.h" @click="timelineHours = w.h; loadTimeline()">
+            <span x-text="w.label"></span>
+          </button>
+        </template>
+        <div class="flex-1"></div>
+        <div class="text-[11px] text-slate-500 num"><span x-text="visits.length"></span> visits</div>
+      </div>
+
+      <div class="glass rounded-2xl p-4">
+        <!-- time scale -->
+        <div class="flex items-baseline justify-between text-[10px] num text-slate-500 mb-2">
+          <span x-text="formatTime(timelineFrom)"></span>
+          <span x-text="formatTime(timelineMid)"></span>
+          <span x-text="formatTime(timelineTo)"></span>
+        </div>
+        <div class="space-y-1 max-h-[60vh] overflow-y-auto scrollbar">
+          <template x-for="row in timelineRows" :key="row.entity_id">
+            <div class="flex items-center gap-2 group">
+              <div class="w-32 sm:w-44 flex-shrink-0 truncate text-xs flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full" :class="classificationDot(row.classification)"></span>
+                <span class="truncate" x-text="row.label"></span>
+              </div>
+              <div class="relative flex-1 h-5 rounded bg-ink-700/30 overflow-hidden">
+                <template x-for="v in row.visits" :key="v.visit_id">
+                  <div class="absolute top-0 bottom-0 rounded"
+                       :style="`left: ${v.left}%; width: ${v.width}%; background: ${visitColor(v)}; opacity: ${0.5 + 0.5 * (v.anomaly_score || 0)};`"
+                       :title="`${formatTime(v.start_unix)} → ${formatTime(v.end_unix)} · ${v.duration_sec}s`"></div>
+                </template>
+              </div>
+            </div>
+          </template>
+          <div x-show="timelineRows.length === 0" class="text-xs text-slate-500 text-center py-12">no visits in this window</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: ALERTS                                                           -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'alerts'" class="animate-fade-in">
+      <div class="space-y-2">
+        <template x-for="a in alerts" :key="a.alert_id">
+          <div class="glass-strong rounded-2xl p-4 border-l-4" :class="severityBorderClass(a.severity)">
+            <div class="flex items-start gap-3">
+              <div class="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center"
+                   :class="severityChipBg(a.severity)">
+                <svg class="w-5 h-5" :class="severityChipText(a.severity)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 9v4M12 17h.01"/>
+                  <circle cx="12" cy="12" r="10"/>
+                </svg>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm font-semibold" x-text="a.rule_id?.replace(/_/g, ' ')"></span>
+                  <span class="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" :class="severityChipFull(a.severity)" x-text="a.severity"></span>
+                  <span class="text-[10px] num text-slate-500" x-text="relTime(a.ts_unix)"></span>
+                  <span x-show="a.home_state" class="text-[10px] uppercase tracking-wider text-slate-500" x-text="'while ' + a.home_state"></span>
+                </div>
+                <div class="mt-1 text-xs text-slate-400">
+                  <span x-show="a.friendly_name || a.entity_id">
+                    <span class="font-mono text-slate-300" x-text="a.friendly_name || a.entity_id"></span>
+                    <span x-show="a.kind" class="text-slate-500"> · <span x-text="a.kind?.replace(/_/g,' ')"></span></span>
+                  </span>
+                </div>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <template x-for="(v, k) in (a.evidence || {})" :key="k">
+                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-ink-700/40 text-[10px] num">
+                      <span class="text-slate-500" x-text="k"></span>
+                      <span class="text-slate-300" x-text="formatEvidence(k, v)"></span>
+                    </span>
+                  </template>
+                </div>
+              </div>
+              <div class="flex flex-col gap-1.5 flex-shrink-0">
+                <button @click="ackAlert(a)" :disabled="a.acknowledged"
+                        class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-ink-600/40 hover:border-signal-glow/40 disabled:opacity-30 disabled:cursor-not-allowed">
+                  <span x-text="a.acknowledged ? '✓ ackd' : 'ack'"></span>
+                </button>
+                <div class="flex gap-1">
+                  <button @click="feedbackAlert(a, 1)" class="text-[10px] px-1.5 py-1 rounded hover:bg-signal-pulse/10"
+                          :class="a.user_feedback === 1 ? 'bg-signal-pulse/20 text-signal-pulse' : 'text-slate-500'">👍</button>
+                  <button @click="feedbackAlert(a, -1)" class="text-[10px] px-1.5 py-1 rounded hover:bg-threat/10"
+                          :class="a.user_feedback === -1 ? 'bg-threat/20 text-threat' : 'text-slate-500'">👎</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div x-show="alerts.length === 0" class="glass rounded-2xl p-12 text-center">
+          <div class="text-5xl mb-2">∅</div>
+          <div class="text-sm text-slate-400">no alerts in the last 24 hours</div>
+          <div class="text-[10px] text-slate-600 mt-1">system is calm</div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ENTITY DETAIL DRAWER -->
+  <div x-show="entityDetail" @click.self="entityDetail = null"
+       x-transition.opacity
+       class="fixed inset-0 z-50 bg-ink-950/80 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4">
+    <div x-show="entityDetail" x-transition
+         class="glass-strong rounded-t-3xl md:rounded-2xl w-full md:max-w-2xl max-h-[92vh] overflow-y-auto scrollbar"
+         @click.stop>
+      <template x-if="entityDetail">
+        <div class="p-5">
+          <div class="flex items-start gap-3 mb-4">
+            <div class="relative w-14 h-14 flex-shrink-0">
+              <div class="absolute inset-0 rounded-full anomaly-ring"
+                   :style="`--score: ${entityDetail.entity?.anomaly_score || 0}; --ring-color: ${heatColor(entityDetail.entity?.anomaly_score || 0)}`"></div>
+              <div class="absolute inset-1 rounded-full bg-ink-900 flex items-center justify-center text-xs font-bold num"
+                   :style="`color: ${heatColor(entityDetail.entity?.anomaly_score || 0)}`"
+                   x-text="Math.round((entityDetail.entity?.anomaly_score || 0) * 100)"></div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <input class="w-full bg-transparent text-xl font-bold tracking-tight outline-none border-b border-transparent hover:border-ink-600/60 focus:border-signal-glow/60 transition py-0.5"
+                     :value="entityDetail.entity?.friendly_name || entityDisplayName(entityDetail.entity)"
+                     @blur="renameEntity($event.target.value)" placeholder="Name this entity…"/>
+              <div class="text-[10px] font-mono text-slate-500 mt-0.5" x-text="entityDetail.entity?.entity_id"></div>
+            </div>
+            <button @click="entityDetail = null" class="text-slate-500 hover:text-slate-200 text-2xl">×</button>
+          </div>
+
+          <!-- classification picker -->
+          <div class="mb-4">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Classification</div>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="c in classifications" :key="c.id">
+                <button @click="classifyEntity(c.id)"
+                        class="px-2.5 py-1 rounded-md text-xs border transition"
+                        :class="entityDetail.entity?.classification === c.id ? c.activeCls : 'border-ink-600/40 text-slate-400 hover:border-ink-500'">
+                  <span x-text="c.label"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- stats grid -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+            <div class="glass rounded-lg p-3">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">Visits</div>
+              <div class="text-2xl num font-bold" x-text="entityDetail.entity?.visit_count ?? 0"></div>
+            </div>
+            <div class="glass rounded-lg p-3">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">Observations</div>
+              <div class="text-2xl num font-bold" x-text="entityDetail.entity?.total_observations?.toLocaleString() ?? 0"></div>
+            </div>
+            <div class="glass rounded-lg p-3">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">Regularity</div>
+              <div class="text-2xl num font-bold" x-text="Math.round((entityDetail.entity?.regularity || 0) * 100) + '%'"></div>
+            </div>
+            <div class="glass rounded-lg p-3">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">Avg RSSI</div>
+              <div class="text-2xl num font-bold" x-text="entityDetail.entity?.avg_rssi != null ? Math.round(entityDetail.entity.avg_rssi) + ' dBm' : '—'"></div>
+            </div>
+          </div>
+
+          <!-- visits heatmap by hour-of-week -->
+          <div class="glass rounded-lg p-3 mb-4">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Visit pattern · hour-of-week</div>
+            <div class="grid grid-cols-24 gap-px" style="grid-template-columns: 32px repeat(24, minmax(0, 1fr));">
+              <div></div>
+              <template x-for="h in 24" :key="h">
+                <div class="text-[8px] text-center text-slate-600 num" x-text="(h-1).toString().padStart(2,'0')"></div>
+              </template>
+              <template x-for="(day, di) in ['Mo','Tu','We','Th','Fr','Sa','Su']" :key="di">
+                <template x-for="block in [[di]]" :key="0">
+                  <div class="contents">
+                    <div class="text-[8px] text-slate-600 num" x-text="day"></div>
+                    <template x-for="h in 24" :key="h">
+                      <div class="aspect-square rounded-sm"
+                           :style="`background: ${heatmapCell(di, h-1)};`"
+                           :title="`${day} ${(h-1)}:00 — ${visitsAt(di, h-1)} visits`"></div>
+                    </template>
+                  </div>
+                </template>
+              </template>
+            </div>
+          </div>
+
+          <!-- recent visits list -->
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Recent visits</div>
+            <div class="space-y-1 max-h-48 overflow-y-auto scrollbar">
+              <template x-for="v in (entityDetail.visits || []).slice(0, 50)" :key="v.visit_id">
+                <div class="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-ink-700/40 text-xs">
+                  <div class="text-slate-500 num text-[10px] w-32" x-text="formatDateTime(v.start_unix)"></div>
+                  <div class="flex-1 num text-slate-400" x-text="formatDuration(v.duration_sec)"></div>
+                  <div class="num text-slate-500 text-[10px]" x-text="(v.observation_count || 0) + ' obs'"></div>
+                  <div class="num text-slate-500 text-[10px]" x-text="v.max_rssi != null ? v.max_rssi + 'dBm' : '—'"></div>
+                </div>
+              </template>
+              <div x-show="(entityDetail.visits || []).length === 0" class="text-xs text-slate-500 text-center py-4">no visit data yet</div>
+            </div>
+          </div>
+
+          <!-- co-presence -->
+          <div x-show="(entityDetail.copresence || []).length > 0" class="mt-4">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Often seen with</div>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="cp in (entityDetail.copresence || [])" :key="cp.entity_id">
+                <button @click="openEntity(cp.entity_id)" class="px-2 py-1 rounded-md text-xs bg-ink-700/40 hover:bg-ink-700/80 transition">
+                  <span x-text="cp.friendly_name || cp.entity_id"></span>
+                  <span class="text-slate-500 ml-1 num text-[10px]" x-text="cp.overlap_count + '×'"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- BOTTOM TAB BAR (mobile) -->
+  <nav class="md:hidden fixed bottom-0 inset-x-0 z-40 glass-strong border-t border-ink-600/40 px-2 pt-1 pb-[calc(env(safe-area-inset-bottom,0px)+0.25rem)]">
+    <div class="grid grid-cols-4 gap-1">
+      <template x-for="t in tabs" :key="t.id">
+        <button @click="tab = t.id"
+                class="flex flex-col items-center justify-center py-2 rounded-lg text-[10px] uppercase tracking-wider transition"
+                :class="tab === t.id ? 'text-signal-glow bg-signal-deep/15' : 'text-slate-500 hover:text-slate-300'">
+          <span x-html="t.icon" class="mb-0.5"></span>
+          <span x-text="t.label"></span>
+        </button>
+      </template>
+    </div>
+  </nav>
+</div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

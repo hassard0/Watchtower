@@ -101,6 +101,7 @@ class ApiServer:
         self._app.router.add_post("/api/settings", self.settings_set)
         # Admin / database tools
         self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
+        self._app.router.add_post("/api/admin/test-ntfy", self.admin_test_ntfy)
         self._app.router.add_post("/api/alerts/ack-all", self.alerts_ack_all)
         # CSV exports
         self._app.router.add_get("/api/export/entities.csv", self.export_entities_csv)
@@ -827,6 +828,24 @@ class ApiServer:
             conn.execute("DELETE FROM entity_visits")
             conn.execute("DELETE FROM entities")
             conn.execute("DELETE FROM analytics_state WHERE key = 'rollup_last_event_id'")
+        return web.json_response({"ok": True})
+
+    async def admin_test_ntfy(self, request: web.Request) -> web.Response:
+        """Send a synthetic high-severity alert through the dispatcher to verify ntfy + webhook + mqtt config."""
+        from watchtower.analytics import _dispatch_external
+        s = load_settings(self._db)
+        await asyncio.get_event_loop().run_in_executor(
+            None, _dispatch_external, s, {
+                "alert_id": "test_" + str(int(time.time())),
+                "ts_unix": int(time.time()),
+                "rule_id": "test_notification",
+                "severity": "high",
+                "entity_id": None,
+                "score": 1.0,
+                "home_state": "test",
+                "evidence": {"explanation": "This is a test alert from the Watchtower Settings tab."},
+            },
+        )
         return web.json_response({"ok": True})
 
     async def alerts_ack_all(self, request: web.Request) -> web.Response:

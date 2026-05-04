@@ -889,6 +889,91 @@ tailwind.config = {
         <div class="text-[10px] text-slate-600 mt-2">Download the SQLite tables as CSV for offline analysis. raw_events is intentionally NOT exported (potentially huge).</div>
       </div>
 
+      <!-- NOTIFICATIONS / OUTBOUND -->
+      <div class="glass rounded-2xl p-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Notifications &amp; integrations</div>
+
+        <!-- ntfy -->
+        <div class="space-y-2 pb-4 border-b border-ink-600/30">
+          <label class="flex items-start gap-3">
+            <input type="checkbox" x-model="settings.ntfy_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
+            <div class="flex-1">
+              <div class="text-sm font-medium">Push notifications via <span class="font-mono">ntfy</span></div>
+              <div class="text-[11px] text-slate-500">Phone gets a banner when alerts fire. Subscribe to your topic in the ntfy app to receive.</div>
+            </div>
+          </label>
+          <div x-show="settings.ntfy_enabled" class="pl-7 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label class="block">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">ntfy server</div>
+              <input type="text" x-model="settings.ntfy_url" @input="settingsDirty = true" placeholder="https://ntfy.sh"
+                     class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-glow/40">
+            </label>
+            <label class="block">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">topic</div>
+              <input type="text" x-model="settings.ntfy_topic" @input="settingsDirty = true" placeholder="my-watchtower-abc123"
+                     class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-glow/40">
+            </label>
+            <label class="block sm:col-span-2">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">push above severity</div>
+              <select x-model="settings.ntfy_min_severity" @change="settingsDirty = true"
+                      class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-signal-glow/40">
+                <option value="low">low+</option>
+                <option value="medium">medium+</option>
+                <option value="high">high+ (recommended)</option>
+                <option value="critical">critical only</option>
+              </select>
+            </label>
+            <button @click="testNtfy()" class="sm:col-span-2 mt-2 px-3 py-2 rounded-md border border-signal-glow/40 text-signal-glow text-xs hover:bg-signal-glow/10">send test push</button>
+          </div>
+        </div>
+
+        <!-- webhook -->
+        <div class="space-y-2 py-4 border-b border-ink-600/30">
+          <label class="flex items-start gap-3">
+            <input type="checkbox" x-model="settings.webhook_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-warm">
+            <div class="flex-1">
+              <div class="text-sm font-medium">Webhook (POST JSON)</div>
+              <div class="text-[11px] text-slate-500">POST every alert as JSON to a URL you control — IFTTT / n8n / your own service.</div>
+            </div>
+          </label>
+          <div x-show="settings.webhook_enabled" class="pl-7">
+            <input type="text" x-model="settings.webhook_url" @input="settingsDirty = true" placeholder="https://example.com/webhook"
+                   class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-warm/40">
+          </div>
+        </div>
+
+        <!-- MQTT -->
+        <div class="space-y-2 pt-4">
+          <label class="flex items-start gap-3">
+            <input type="checkbox" x-model="settings.mqtt_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-deep">
+            <div class="flex-1">
+              <div class="text-sm font-medium">MQTT publish</div>
+              <div class="text-[11px] text-slate-500">Publish alerts to <span class="font-mono">{prefix}/alerts/{severity}</span>. Home Assistant, Node-RED, etc. can subscribe and trigger actions (lights, siren, etc.).</div>
+            </div>
+          </label>
+          <div x-show="settings.mqtt_enabled" class="pl-7 grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <label class="block sm:col-span-2">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">broker host</div>
+              <input type="text" x-model="settings.mqtt_host" @input="settingsDirty = true" placeholder="192.168.x.y or homeassistant.local"
+                     class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-deep/40">
+            </label>
+            <label class="block">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">port</div>
+              <input type="number" x-model.number="settings.mqtt_port" @input="settingsDirty = true"
+                     class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-deep/40">
+            </label>
+            <label class="block sm:col-span-3">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">topic prefix</div>
+              <input type="text" x-model="settings.mqtt_topic_prefix" @input="settingsDirty = true" placeholder="watchtower"
+                     class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-deep/40">
+            </label>
+          </div>
+        </div>
+      </div>
+
       <!-- DANGER ZONE -->
       <div class="glass rounded-2xl p-5 border border-threat/20">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Database tools</div>

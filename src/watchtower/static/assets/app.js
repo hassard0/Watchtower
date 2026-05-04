@@ -304,6 +304,19 @@ function watchtower() {
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
       })[key] || '';
     },
+    async testNtfy() {
+      try {
+        // Save settings first if dirty so the test uses the current values.
+        if (this.settingsDirty) await this.saveSettings();
+        const r = await fetch('/api/admin/test-ntfy', { method: 'POST' });
+        if (r.ok) {
+          alert('Test alert dispatched. Check your phone / webhook / MQTT subscriber.');
+        } else {
+          alert('Test failed: ' + r.status);
+        }
+      } catch (e) { alert('failed: ' + e.message); }
+    },
+
     async resetEntities() {
       if (!confirm('Wipe entities/visits and rebuild from raw_events on next analytics tick?')) return;
       try {

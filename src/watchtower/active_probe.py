@@ -48,6 +48,16 @@ COOLDOWN_SUCCESS_SEC = 7 * 86400   # don't re-probe successful entities for a we
 COOLDOWN_FAILURE_SEC = 24 * 3600   # don't re-probe failed entities for a day
 
 
+def _mark_outgoing(mac: str) -> None:
+    """Tell the Honeypot watcher we initiated this connect so it doesn't
+    flag it as honeypot engagement."""
+    try:
+        from watchtower.honeypot import Honeypot
+        Honeypot.mark_outgoing(mac)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def probe_one(mac: str, adapter: str | None = "hci0", pause_scanner=None) -> dict:
     """Connect to MAC, read characteristics, return dict.
 
@@ -67,6 +77,7 @@ async def probe_one(mac: str, adapter: str | None = "hci0", pause_scanner=None) 
         pause_ctx = _noop()
     else:
         pause_ctx = await pause_scanner()
+    _mark_outgoing(mac)
     try:
         async with pause_ctx:
             try:

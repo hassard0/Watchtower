@@ -54,7 +54,21 @@ DEFAULT_SETTINGS = {
     "active_probing_enabled": False,         # GATT probe to fetch friendly names
     "honeypot_enabled": False,                # rotating BLE lure broadcaster
     "honeypot_rotate_minutes": 30,            # cycle through lure list every N min
+    # ntfy push notifications:
+    "ntfy_enabled": False,
+    "ntfy_url": "https://ntfy.sh",            # base URL of ntfy server
+    "ntfy_topic": "",                         # the topic; empty = disabled
+    "ntfy_min_severity": "high",              # one of: low, medium, high, critical
+    # External event sinks for active deterrence:
+    "webhook_enabled": False,
+    "webhook_url": "",                        # POST alerts to this URL
+    "mqtt_enabled": False,
+    "mqtt_host": "",
+    "mqtt_port": 1883,
+    "mqtt_topic_prefix": "watchtower",
 }
+
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def load_settings(db_path) -> dict:
@@ -84,6 +98,76 @@ def save_settings(db_path, settings: dict) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_unix = excluded.updated_unix",
             (json.dumps(cleaned), int(time.time())),
         )
+
+
+def _dispatch_external(settings: dict, alert_payload: dict) -> None:
+    """Fire-and-forget external delivery: ntfy push, webhook POST, MQTT publish.
+
+    Called inline from _fire(). Non-blocking-ish: short timeouts, exceptions
+    swallowed (logged) so a flaky external never breaks rule evaluation.
+    """
+    severity = alert_payload.get("severity") or "medium"
+    rule_id = alert_payload.get("rule_id") or "alert"
+    sev_rank = _SEVERITY_RANK.get(severity, 1)
+
+    # ---- ntfy ----
+    if settings.get("ntfy_enabled") and settings.get("ntfy_topic"):
+        min_sev = _SEVERITY_RANK.get(settings.get("ntfy_min_severity") or "high", 2)
+        if sev_rank >= min_sev:
+            try:
+                import urllib.request
+                base = (settings.get("ntfy_url") or "https://ntfy.sh").rstrip("/")
+                topic = settings["ntfy_topic"].strip("/")
+                url = f"{base}/{topic}"
+                evidence = alert_payload.get("evidence") or {}
+                ev_brief = " · ".join(f"{k}={v}" for k, v in list(evidence.items())[:4])
+                body = f"[{severity.upper()}] {rule_id}\n{alert_payload.get('entity_id') or ''}\n{ev_brief}".encode("utf-8")
+                # ntfy reads Title/Priority/Tags from headers
+                priority_map = {"low": 2, "medium": 3, "high": 4, "critical": 5}
+                tag_map = {"low": "speech_balloon", "medium": "warning", "high": "rotating_light", "critical": "rotating_light"}
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    headers={
+                        "Title": f"Watchtower · {rule_id}",
+                        "Priority": str(priority_map.get(severity, 3)),
+                        "Tags": tag_map.get(severity, "warning"),
+                        "Click": "http://watchtower.local:8080/",
+                    },
+                )
+                urllib.request.urlopen(req, timeout=4)
+            except Exception:  # noqa: BLE001
+                log.exception("ntfy dispatch failed")
+
+    # ---- webhook ----
+    if settings.get("webhook_enabled") and settings.get("webhook_url"):
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                settings["webhook_url"],
+                data=json.dumps(alert_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=4)
+        except Exception:  # noqa: BLE001
+            log.exception("webhook dispatch failed")
+
+    # ---- MQTT ----
+    if settings.get("mqtt_enabled") and settings.get("mqtt_host"):
+        try:
+            import paho.mqtt.publish as mqtt_publish
+            prefix = (settings.get("mqtt_topic_prefix") or "watchtower").strip("/")
+            topic = f"{prefix}/alerts/{severity}"
+            mqtt_publish.single(
+                topic,
+                payload=json.dumps(alert_payload),
+                hostname=settings["mqtt_host"],
+                port=int(settings.get("mqtt_port") or 1883),
+                keepalive=10,
+                retain=False,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("mqtt dispatch failed")
 
 
 def _hour_of_week(ts_unix: int) -> int:
@@ -683,12 +767,19 @@ class Analytics:
             ).fetchone()
             if existing:
                 return
+            alert_id = str(ULID())
             conn.execute(
                 """INSERT INTO alerts (alert_id, ts_unix, rule_id, severity, entity_id, score, home_state, evidence_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(ULID()), now, rule_id, severity, entity_id,
+                (alert_id, now, rule_id, severity, entity_id,
                  score, home_state, json.dumps(evidence)),
             )
+            # Fire-and-forget external delivery (ntfy / webhook / MQTT).
+            _dispatch_external(S, {
+                "alert_id": alert_id, "ts_unix": now, "rule_id": rule_id,
+                "severity": severity, "entity_id": entity_id, "score": score,
+                "home_state": home_state, "evidence": evidence,
+            })
 
         # ---- Rule 1: anchor_absent_unknown_linger ----
         # Only meaningful if we know who's home — i.e., at least one anchor enrolled.

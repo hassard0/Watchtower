@@ -171,6 +171,39 @@ CREATE TABLE IF NOT EXISTS findmy_cluster_macs (
 );
 CREATE INDEX IF NOT EXISTS idx_findmy_cluster_macs_cluster ON findmy_cluster_macs(cluster_id);
 
--- Set schema version to 4 (idempotent migration).
-DELETE FROM schema_meta WHERE version < 4;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (4);
+-- v5: owned Find-My trackers (master-secret import + catalog matching).
+-- These are the user's own AirTags / Find-My-enabled accessories. Paired
+-- on a real Apple device, master secret extracted via OpenHaystack on Mac.
+-- We precompute future BLE pubkeys in findmy_key_catalog so we can match
+-- incoming Find-My broadcasts deterministically and label them with the
+-- user's name (e.g. "Ian's Keys", "Living Room").
+
+CREATE TABLE IF NOT EXISTS findmy_owned_trackers (
+    tracker_id      TEXT PRIMARY KEY,            -- ULID
+    name            TEXT NOT NULL,
+    enrolled_unix   INTEGER NOT NULL,
+    last_match_unix INTEGER,
+    catalog_to_unix INTEGER NOT NULL DEFAULT 0,  -- catalog computed up to this slot start
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_findmy_owned_name ON findmy_owned_trackers(name);
+
+-- Pre-computed expected public keys per 15-min slot. One entry per
+-- tracker × slot. Lookup by pubkey_22b_hex on every incoming Find-My event.
+CREATE TABLE IF NOT EXISTS findmy_key_catalog (
+    tracker_id        TEXT NOT NULL,
+    slot_index        INTEGER NOT NULL,
+    slot_start_unix   INTEGER NOT NULL,
+    pubkey_22b_hex    TEXT NOT NULL,             -- bytes 6..27 of EC public X coord
+    pubkey_top_bits   INTEGER NOT NULL,          -- top 2 bits of byte 0 (used in adv byte 23)
+    expected_mac      TEXT NOT NULL,
+    PRIMARY KEY (tracker_id, slot_index),
+    FOREIGN KEY (tracker_id) REFERENCES findmy_owned_trackers(tracker_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_findmy_catalog_pubkey ON findmy_key_catalog(pubkey_22b_hex);
+CREATE INDEX IF NOT EXISTS idx_findmy_catalog_mac ON findmy_key_catalog(expected_mac);
+CREATE INDEX IF NOT EXISTS idx_findmy_catalog_slot ON findmy_key_catalog(slot_start_unix);
+
+-- Set schema version to 5 (idempotent migration).
+DELETE FROM schema_meta WHERE version < 5;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (5);

@@ -386,9 +386,18 @@ class Analytics:
                     # Find-My-specific cluster tracking (across rotating MACs).
                     if mfr_hex.lower().startswith("4c0012"):
                         from watchtower.findmy_clusters import process_findmy_event
+                        from watchtower.findmy_owned import match_event as findmy_match_owned
                         try:
-                            process_findmy_event(conn, feats.get("mac"), mfr_hex,
-                                                 feats.get("rssi"), ts_unix)
+                            cluster_id = process_findmy_event(conn, feats.get("mac"), mfr_hex,
+                                                              feats.get("rssi"), ts_unix)
+                            # Catalog match: is this one of the user's own trackers?
+                            owned = findmy_match_owned(conn, mfr_hex, feats.get("mac"))
+                            if owned and cluster_id:
+                                # Stamp the cluster as enrolled with the user-given name.
+                                conn.execute(
+                                    "UPDATE findmy_clusters SET user_label = ?, classification = 'enrolled' WHERE cluster_id = ?",
+                                    (owned["name"], cluster_id),
+                                )
                         except Exception:  # noqa: BLE001
                             log.exception("findmy: cluster processing failed")
                 rssi_int = None
@@ -499,6 +508,26 @@ class Analytics:
                     )
             except Exception:  # noqa: BLE001
                 log.exception("findmy: cluster inference failed")
+
+            # Refresh owned-tracker catalogs every ~4 hours.
+            try:
+                from watchtower.findmy_owned import regenerate_all_catalogs, CATALOG_REFRESH_SEC
+                state_row = conn.execute(
+                    "SELECT updated_unix FROM analytics_state WHERE key = 'findmy_owned_catalog_last_refresh'"
+                ).fetchone()
+                last_run = state_row[0] if state_row else 0
+                if (now - last_run) > CATALOG_REFRESH_SEC:
+                    regenerated = regenerate_all_catalogs(self._db)
+                    if regenerated:
+                        log.info("findmy_owned: catalog refreshed (%d new slots)", regenerated)
+                    conn.execute(
+                        "INSERT INTO analytics_state(key, value, updated_unix) "
+                        "VALUES('findmy_owned_catalog_last_refresh', '', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET updated_unix = excluded.updated_unix",
+                        (now,),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("findmy_owned: catalog refresh failed")
 
             # Evaluate rules → alerts.
             self._evaluate_rules(conn)

@@ -11,7 +11,14 @@ function watchtower() {
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
     findmyData: { observers: [], distinct_count: 0, by_status: {}, daily_presence: [] },
     findmyClusters: [],
+    findmyOwned: [],
     findmyWindowSec: 300,
+    showFindmyEnroll: false,
+    findmyEnrollName: '',
+    findmyEnrollPriv: '',
+    findmyEnrollSym: '',
+    findmyEnrollError: '',
+    findmyEnrollSuccess: '',
     zones: [],
     // Per-tab loading state. true while fetching.
     tabLoading: {},
@@ -228,15 +235,60 @@ function watchtower() {
 
     async loadFindmy() {
       try {
-        const [obsR, clusR] = await Promise.all([
+        const [obsR, clusR, ownR] = await Promise.all([
           fetch(`/api/findmy/observers?window=${this.findmyWindowSec}`),
           fetch('/api/findmy/clusters?active_only=1'),
+          fetch('/api/findmy/owned'),
         ]);
         this.findmyData = await obsR.json();
         const cj = await clusR.json();
         this.findmyClusters = cj.clusters || [];
+        const oj = await ownR.json();
+        this.findmyOwned = oj.trackers || [];
         this.tabsLoaded = { ...this.tabsLoaded, findmy: true };
       } catch (e) { console.warn('loadFindmy', e); }
+    },
+
+    async enrollFindmyTracker() {
+      this.findmyEnrollError = '';
+      this.findmyEnrollSuccess = '';
+      try {
+        const r = await fetch('/api/findmy/owned', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: this.findmyEnrollName.trim(),
+            master_priv_b64: this.findmyEnrollPriv.trim(),
+            master_sym_b64: this.findmyEnrollSym.trim(),
+          }),
+        });
+        const j = await r.json();
+        if (!r.ok) {
+          this.findmyEnrollError = j.error || ('HTTP ' + r.status);
+          return;
+        }
+        this.findmyEnrollSuccess = `Enrolled "${this.findmyEnrollName}". Catalog precomputed for next 24 h.`;
+        this.findmyEnrollName = ''; this.findmyEnrollPriv = ''; this.findmyEnrollSym = '';
+        await this.loadFindmy();
+      } catch (e) {
+        this.findmyEnrollError = e.message;
+      }
+    },
+
+    async deleteFindmyTracker(tid, name) {
+      if (!confirm(`Delete tracker "${name}"? Master secret + catalog will be removed.`)) return;
+      try {
+        await fetch(`/api/findmy/owned/${tid}`, { method: 'DELETE' });
+        await this.loadFindmy();
+      } catch (e) { console.warn(e); }
+    },
+
+    async regenFindmyTracker(tid) {
+      try {
+        const r = await fetch(`/api/findmy/owned/${tid}/regenerate`, { method: 'POST' });
+        const j = await r.json();
+        await this.loadFindmy();
+        alert(`Catalog refreshed: ${j.slots_inserted} new slots.`);
+      } catch (e) { alert(e.message); }
     },
 
     async labelCluster(cid, label) {

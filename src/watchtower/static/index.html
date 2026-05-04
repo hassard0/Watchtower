@@ -732,6 +732,61 @@ tailwind.config = {
         </template>
       </div>
 
+      <!-- OWNED TRACKERS — master-secret catalog matching -->
+      <div class="glass rounded-2xl p-4 mb-3">
+        <div class="flex items-baseline justify-between mb-2">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Owned trackers (catalog match)</div>
+            <div class="text-sm">Cryptographically certain identification of YOUR AirTags</div>
+          </div>
+          <button @click="showFindmyEnroll = !showFindmyEnroll" class="text-xs px-3 py-1.5 rounded border border-signal-glow/40 text-signal-glow hover:bg-signal-glow/10">
+            <span x-show="!showFindmyEnroll">+ enroll AirTag</span>
+            <span x-show="showFindmyEnroll">cancel</span>
+          </button>
+        </div>
+
+        <!-- enroll form -->
+        <div x-show="showFindmyEnroll" class="mt-2 mb-3 p-3 rounded-lg bg-ink-700/30 border border-ink-600/40 space-y-2">
+          <div class="text-[11px] text-slate-400 leading-relaxed">
+            Extract your AirTag's keys with <a href="https://github.com/seemoo-lab/openhaystack" target="_blank" class="text-signal-glow underline">OpenHaystack on macOS</a>. Each accessory gives you 28 bytes "master private key" and 32 bytes "master symmetric key" — both base64. Paste them here:
+          </div>
+          <input type="text" placeholder="Tracker name (e.g. 'Ian's keys')" x-model="findmyEnrollName"
+                 class="w-full bg-ink-800/60 border border-ink-600/40 rounded px-3 py-1.5 text-sm">
+          <input type="text" placeholder="master_priv (base64, 28 bytes decoded)" x-model="findmyEnrollPriv"
+                 class="w-full bg-ink-800/60 border border-ink-600/40 rounded px-3 py-1.5 text-xs font-mono">
+          <input type="text" placeholder="master_sym (base64, 32 bytes decoded)" x-model="findmyEnrollSym"
+                 class="w-full bg-ink-800/60 border border-ink-600/40 rounded px-3 py-1.5 text-xs font-mono">
+          <button @click="enrollFindmyTracker()"
+                  :disabled="!findmyEnrollName || !findmyEnrollPriv || !findmyEnrollSym"
+                  class="px-4 py-2 rounded-md bg-signal-glow/20 border border-signal-glow/60 text-signal-glow text-xs font-semibold hover:bg-signal-glow/30 disabled:opacity-30 disabled:cursor-not-allowed">
+            Enroll &amp; build catalog
+          </button>
+          <div x-show="findmyEnrollError" class="text-[11px] text-threat" x-text="findmyEnrollError"></div>
+          <div x-show="findmyEnrollSuccess" class="text-[11px] text-signal-pulse" x-text="findmyEnrollSuccess"></div>
+        </div>
+
+        <!-- list -->
+        <div x-show="findmyOwned.length > 0" class="space-y-1">
+          <template x-for="t in findmyOwned" :key="t.tracker_id">
+            <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-700/20">
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium" x-text="t.name"></div>
+                <div class="text-[10px] text-slate-500 num">
+                  <span x-text="t.future_slots_in_catalog + ' slots in catalog'"></span>
+                  <span class="mx-1 text-slate-700">·</span>
+                  <span x-text="t.last_match_unix ? 'last match ' + relTime(t.last_match_unix) : 'never matched yet'"></span>
+                </div>
+              </div>
+              <button @click="regenFindmyTracker(t.tracker_id)" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-ink-600">refresh</button>
+              <button @click="deleteFindmyTracker(t.tracker_id, t.name)" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-threat/40 text-threat hover:bg-threat/10">delete</button>
+            </div>
+          </template>
+        </div>
+        <div x-show="findmyOwned.length === 0" class="text-[11px] text-slate-500 text-center py-3">
+          No enrolled trackers yet. Once enrolled, this Pi will deterministically identify your AirTags by name on every broadcast.
+        </div>
+      </div>
+
       <!-- STABLE CLUSTERS — same physical tracker across MAC rotations -->
       <div class="glass rounded-2xl p-4 mb-3" x-show="(findmyClusters || []).length > 0">
         <div class="flex items-baseline justify-between mb-2">

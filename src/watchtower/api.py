@@ -99,6 +99,11 @@ class ApiServer:
         # Find-My stable clusters — joined across MAC rotations
         self._app.router.add_get("/api/findmy/clusters", self.findmy_clusters_list)
         self._app.router.add_post("/api/findmy/clusters/{cid}/label", self.findmy_clusters_label)
+        # Owned-tracker enrollment (catalog matching)
+        self._app.router.add_get("/api/findmy/owned", self.findmy_owned_list)
+        self._app.router.add_post("/api/findmy/owned", self.findmy_owned_add)
+        self._app.router.add_delete("/api/findmy/owned/{tid}", self.findmy_owned_delete)
+        self._app.router.add_post("/api/findmy/owned/{tid}/regenerate", self.findmy_owned_regen)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
@@ -1118,6 +1123,70 @@ class ApiServer:
             if cur.rowcount == 0:
                 return web.json_response({"error": "cluster not found"}, status=404)
         return web.json_response({"ok": True})
+
+    # ---- OWNED TRACKER ENROLLMENT ----
+
+    async def findmy_owned_list(self, request: web.Request) -> web.Response:
+        from watchtower.findmy_owned import list_trackers
+        trackers = await asyncio.get_event_loop().run_in_executor(
+            None, list_trackers, self._db,
+        )
+        return web.json_response({"trackers": trackers})
+
+    async def findmy_owned_add(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        priv = (body.get("master_priv_b64") or "").strip()
+        sym = (body.get("master_sym_b64") or "").strip()
+        if not (name and priv and sym):
+            return web.json_response(
+                {"error": "name, master_priv_b64, master_sym_b64 all required"},
+                status=400,
+            )
+        try:
+            from watchtower.findmy_owned import store_tracker, regenerate_catalog
+            tid = await asyncio.get_event_loop().run_in_executor(
+                None, store_tracker, self._db, name, priv, sym,
+            )
+            # Pre-populate the catalog immediately so first match is < 4 hr away.
+            with get_connection(self._db) as conn:
+                row = conn.execute(
+                    "SELECT enrolled_unix FROM findmy_owned_trackers WHERE tracker_id = ?",
+                    (tid,),
+                ).fetchone()
+                enrolled = row[0] if row else int(time.time())
+            await asyncio.get_event_loop().run_in_executor(
+                None, regenerate_catalog, self._db, tid, enrolled,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:  # noqa: BLE001
+            log.exception("findmy_owned_add failed")
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"ok": True, "tracker_id": tid})
+
+    async def findmy_owned_delete(self, request: web.Request) -> web.Response:
+        from watchtower.findmy_owned import delete_tracker
+        tid = request.match_info["tid"]
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, delete_tracker, self._db, tid,
+        )
+        return web.json_response({"ok": ok})
+
+    async def findmy_owned_regen(self, request: web.Request) -> web.Response:
+        from watchtower.findmy_owned import regenerate_catalog
+        tid = request.match_info["tid"]
+        with get_connection(self._db) as conn:
+            row = conn.execute(
+                "SELECT enrolled_unix FROM findmy_owned_trackers WHERE tracker_id = ?",
+                (tid,),
+            ).fetchone()
+        if not row:
+            return web.json_response({"error": "not found"}, status=404)
+        n = await asyncio.get_event_loop().run_in_executor(
+            None, regenerate_catalog, self._db, tid, row[0],
+        )
+        return web.json_response({"ok": True, "slots_inserted": n})
 
     async def findmy_tracker_status(self, request: web.Request) -> web.Response:
         if self._findmy_tracker is None:

@@ -138,6 +138,53 @@ function watchtower() {
       const t = { ...alert, id };
       this.toasts.push(t);
       setTimeout(() => this.dismissToast(id), 8000);
+      this.beep(alert.severity);
+    },
+
+    audioEnabled: false,
+    _audioCtx: null,
+    enableAudio() {
+      try {
+        this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        this.audioEnabled = true;
+        try { localStorage.setItem('watchtower.audio', '1'); } catch (e) {}
+        // Confirmation chirp
+        this.beep('medium');
+      } catch (e) { console.warn(e); }
+    },
+    disableAudio() {
+      this.audioEnabled = false;
+      try { localStorage.removeItem('watchtower.audio'); } catch (e) {}
+    },
+    beep(severity) {
+      if (!this.audioEnabled || !this._audioCtx) return;
+      const ctx = this._audioCtx;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      const f = severity === 'critical' ? 880 : severity === 'high' ? 660 : 440;
+      o.frequency.value = f;
+      g.gain.value = 0.0001;
+      o.connect(g).connect(ctx.destination);
+      const t = ctx.currentTime;
+      g.gain.exponentialRampToValueAtTime(0.18, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+      o.start(t); o.stop(t + 0.42);
+      if (severity === 'critical' || severity === 'high') {
+        // Double beep
+        setTimeout(() => this._beepOnce(f), 250);
+      }
+    },
+    _beepOnce(f) {
+      if (!this._audioCtx) return;
+      const ctx = this._audioCtx;
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f; g.gain.value = 0.0001;
+      o.connect(g).connect(ctx.destination);
+      const t = ctx.currentTime;
+      g.gain.exponentialRampToValueAtTime(0.18, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+      o.start(t); o.stop(t + 0.32);
     },
 
     dismissToast(id) {

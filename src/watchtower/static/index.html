@@ -122,6 +122,18 @@ tailwind.config = {
         <svg class="w-4 h-4 text-signal-deep group-hover:text-signal-glow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 5V3M12 21v-2M5 12H3M21 12h-2M7 7l-1.4-1.4M18.4 18.4 17 17M7 17l-1.4 1.4M18.4 5.6 17 7"/></svg>
         <span class="text-xs font-medium text-signal-deep group-hover:text-signal-glow">Probe</span>
       </a>
+      <button x-show="!audioEnabled" @click="enableAudio()" title="Enable audio alerts for high-severity events"
+              class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-pulse/40 transition">
+        <svg class="w-4 h-4 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6"/>
+        </svg>
+      </button>
+      <button x-show="audioEnabled" @click="disableAudio()" title="Disable audio alerts"
+              class="p-1.5 rounded-md bg-signal-pulse/15 border border-signal-pulse/40 hover:border-signal-pulse/80 transition">
+        <svg class="w-4 h-4 text-signal-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>
+        </svg>
+      </button>
       <button @click="refresh()" class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition" :class="loading && 'animate-spin'">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
       </button>

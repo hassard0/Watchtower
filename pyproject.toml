@@ -6,12 +6,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "bleak>=0.22",
-    "pyrtlsdr>=0.3.0",
+    "pyrtlsdr>=0.3.0,<0.4",   # pyrtlsdr 0.4 requires rtlsdr_set_dithering, missing from Debian 13 librtlsdr 2.0.2
+    "setuptools>=68,<80",     # pyrtlsdr 0.3.x imports pkg_resources; setuptools dropped it in v80+
     "python-ulid>=2.7",
     "structlog>=24.4",
     "tomli>=2.0; python_version<'3.11'",
     "click>=8.1",
     "numpy>=1.26",
+    "typing-extensions>=4.0",
 ]
 
 [project.scripts]

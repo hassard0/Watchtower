@@ -65,7 +65,8 @@ class SubGhzScanner(Scanner):
         device_index: int = 0,
     ) -> None:
         super().__init__()
-        self._args = rtl_433_args or ["-F", "json", "-d", str(device_index), "-G", "5"]
+        # rtl_433 25.02 deprecated -G; passing it causes immediate exit. Use default protocol set.
+        self._args = rtl_433_args or ["-F", "json", "-d", str(device_index)]
 
     async def run(self) -> None:
         cmd = ["rtl_433", *self._args]

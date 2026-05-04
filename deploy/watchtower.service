@@ -1,0 +1,26 @@
+[Unit]
+Description=Watchtower RF perimeter awareness daemon
+After=network-online.target bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/watchtower
+ExecStart=/opt/watchtower/.venv/bin/watchtower run --config /etc/watchtower/watchtower.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/watchtower/watchtower.log
+StandardError=append:/var/log/watchtower/watchtower.err
+
+# Security hardening (loosened for hardware access).
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# Bluetooth + USB SDR access requires non-restricted device groups.
+SupplementaryGroups=bluetooth plugdev
+
+[Install]
+WantedBy=multi-user.target

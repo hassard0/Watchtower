@@ -11,6 +11,7 @@ import click
 from watchtower.active_probe import GattProber
 from watchtower.analytics import Analytics, load_settings
 from watchtower.api import ApiServer
+from watchtower.findmy_tracker import FindMyTracker
 from watchtower.honeypot import Honeypot
 from watchtower.bus import Bus
 from watchtower.config import load_config
@@ -126,7 +127,16 @@ async def _run_async(config_path: Path) -> None:
                         rotate_minutes_check=_hp_rotate_min)
     honeypot_task = asyncio.create_task(honeypot.run(stop))
 
+    # OpenHaystack-style Pi-as-AirTag broadcaster.
+    findmy_tracker = FindMyTracker(
+        cfg.storage.db_path,
+        enabled_check=lambda: bool(load_settings(cfg.storage.db_path).get("findmy_tracker_enabled")),
+        honeypot_check=_hp_enabled,
+    )
+    findmy_task = asyncio.create_task(findmy_tracker.run(stop))
+
     api = ApiServer(cfg.storage.db_path, host="0.0.0.0", port=8080)
+    api.set_findmy_tracker(findmy_tracker)
     api.set_pause_scanner_factory(pause_factory)
     await api.start()
 
@@ -136,7 +146,7 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
-    for t in (pruner_task, analytics_task, prober_task, honeypot_task):
+    for t in (pruner_task, analytics_task, prober_task, honeypot_task, findmy_task):
         t.cancel()
         try:
             await t

@@ -57,6 +57,7 @@ DEFAULT_SETTINGS = {
     "active_probing_enabled": False,         # GATT probe to fetch friendly names
     "honeypot_enabled": False,                # rotating BLE lure broadcaster
     "honeypot_rotate_minutes": 30,            # cycle through lure list every N min
+    "findmy_tracker_enabled": False,          # broadcast as a Find-My-compatible AirTag
     # ntfy push notifications:
     "ntfy_enabled": False,
     "ntfy_url": "https://ntfy.sh",            # base URL of ntfy server

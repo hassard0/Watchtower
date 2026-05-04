@@ -331,6 +331,14 @@ function watchtower() {
         'rule_honeypot_engaged':             'Fires when a device connects to one of our honeypot lures (Tesla key, smart lock, etc.).',
       })[key] || '';
     },
+    findmyKey: null,
+    async loadFindmyTrackerKey() {
+      try {
+        const r = await fetch('/api/findmy/tracker');
+        this.findmyKey = await r.json();
+      } catch (e) { alert('failed: ' + e.message); }
+    },
+
     async testNtfy() {
       try {
         // Save settings first if dirty so the test uses the current values.

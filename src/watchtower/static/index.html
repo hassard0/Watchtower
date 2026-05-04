@@ -976,6 +976,25 @@ tailwind.config = {
                      class="w-32 bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-threat/40">
             </label>
           </div>
+
+          <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition mt-2">
+            <input type="checkbox" x-model="settings.findmy_tracker_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-deep">
+            <div class="flex-1">
+              <div class="text-sm font-medium flex items-center gap-2">
+                <span>Find-My tracker (OpenHaystack mode)</span>
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-deep/15 text-signal-deep">experimental</span>
+              </div>
+              <div class="text-[11px] text-slate-500">Pi broadcasts as a Find-My-compatible AirTag using a self-generated EC P-224 key. Real iPhones in range will report its location to Apple's servers — useful as a $0 anti-theft beacon and verifies Apple-network coverage. Mutually exclusive with the lure honeypot above (they share the BLE adapter).</div>
+              <button x-show="settings.findmy_tracker_enabled" @click.prevent="loadFindmyTrackerKey()" class="mt-2 px-3 py-1.5 rounded-md border border-signal-deep/40 text-signal-deep text-xs hover:bg-signal-deep/10">show tracker key (for OpenHaystack)</button>
+              <div x-show="findmyKey" class="mt-2 text-[11px] font-mono bg-ink-700/40 border border-ink-600/40 rounded p-2 break-all">
+                <div class="text-slate-500 mb-1">BLE MAC: <span class="text-signal-glow" x-text="findmyKey?.ble_mac"></span></div>
+                <div class="text-slate-500 mb-1">Public key (base64):</div>
+                <div class="text-slate-200" x-text="findmyKey?.public_key_b64"></div>
+                <div class="mt-2 text-[10px] text-slate-500">To retrieve location reports: install OpenHaystack on macOS, paste the key. Pi keeps the private key in <span class="font-mono">/var/lib/watchtower/findmy_tracker.key.pem</span>.</div>
+              </div>
+            </div>
+          </label>
         </div>
       </div>
 

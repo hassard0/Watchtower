@@ -92,6 +92,8 @@ class ApiServer:
         self._app.router.add_delete("/api/probe/{capture_id}", self.probe_discard)
         # Spectrum live read
         self._app.router.add_get("/api/spectrum", self.spectrum)
+        # Find-My tracker (OpenHaystack mode)
+        self._app.router.add_get("/api/findmy/tracker", self.findmy_tracker_status)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
@@ -117,10 +119,15 @@ class ApiServer:
         self._probe_task: asyncio.Task | None = None
         self._stopping = False
         self._pause_scanner_factory = None
+        self._findmy_tracker = None
 
     def set_pause_scanner_factory(self, factory) -> None:
         """Inject a coordinator so on-demand probes can pause the BLE scanner."""
         self._pause_scanner_factory = factory
+
+    def set_findmy_tracker(self, tracker) -> None:
+        """Inject the FindMyTracker so /api/findmy can expose the keypair."""
+        self._findmy_tracker = tracker
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app, access_log=None)
@@ -982,6 +989,17 @@ class ApiServer:
             "peak_unique_macs_at_unix": ble_per_5min[0] if ble_per_5min else 0,
             "total_events": total_events,
         })
+
+    # ---- FIND-MY TRACKER ----
+
+    async def findmy_tracker_status(self, request: web.Request) -> web.Response:
+        if self._findmy_tracker is None:
+            return web.json_response({"error": "tracker not initialized"}, status=503)
+        status = self._findmy_tracker.get_status()
+        # Suppress private key from default GET; require ?reveal=1 to include it.
+        if request.query.get("reveal") != "1":
+            status.pop("private_key_pem", None)
+        return web.json_response(status)
 
     # ---- DISCOVERY ----
 

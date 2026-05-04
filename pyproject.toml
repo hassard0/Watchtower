@@ -37,3 +37,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/watchtower"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/watchtower/storage/schema.sql" = "watchtower/storage/schema.sql"

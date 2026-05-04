@@ -30,32 +30,50 @@ from watchtower.storage.db import get_connection
 
 log = logging.getLogger(__name__)
 
-# Curated lure name catalog. Mix of vehicle / smart-lock / high-value-electronic
-# / recon-tool / IoT-exposed / stolen-device patterns. Names DON'T match any
-# specific user device or location to avoid creating an attractive nuisance
-# pointing at the real property.
+# Curated lure-name catalog. Names are *plausible everyday devices* — the
+# point is to look indistinguishable from a real household so a recon-mode
+# scanner sees nothing suspicious. A device labeled "FBI-Surveillance-Van"
+# screams trap; "AirPods Pro" or "Tesla Model Y" reads as a normal home.
+# Names don't match the user's actual property/devices.
 LURE_CATALOG: list[tuple[str, str]] = [
     # (advertising name, category — used in dashboard labels)
-    ("Tesla-Model-S-RKE-7842",                     "vehicle"),
-    ("BMW-ComfortAccess-9E2A",                     "vehicle"),
-    ("MercedesMe-CONN-3F1B",                       "vehicle"),
-    ("KIA-AccessKey-AC03",                         "vehicle"),
-    ("Yale-AssureBT-1A8C",                         "smart-lock"),
-    ("August-Smart-Lock-Pro-V4",                   "smart-lock"),
-    ("Schlage-Encode-Plus",                        "smart-lock"),
-    ("Igloohome-Padlock-92F0",                     "smart-lock"),
-    ("Apple-Watch-Ultra-Susan",                    "high-value"),
-    ("Beats-Studio-Pro",                           "high-value"),
-    ("Sonos-Roam-Bedroom",                         "high-value"),
-    ("DJI-Mavic-Pro-3",                            "high-value"),
-    ("Nest-Cam-IQ-Indoor-2C8B",                    "iot-exposed"),
-    ("Ring-Doorbell-Pro-90AF",                     "iot-exposed"),
-    ("EZVIZ-Smart-Cam-Default",                    "iot-exposed"),
-    ("EXPOSED-PROD-DEBUG-DO-NOT-USE",              "recon-bait"),
-    ("FBI-SURVEILLANCE-VAN-5",                     "recon-bait"),
-    ("pi-cam-streaming-default-pwd",               "recon-bait"),
-    ("AirTag-Stolen-Bike",                         "recon-bait"),
-    ("ChargePoint-EV-Station-7",                   "vehicle"),
+    # Vehicles — common modern cars
+    ("Tesla Model Y",          "vehicle"),
+    ("Tesla Model 3",          "vehicle"),
+    ("BMW iX1",                "vehicle"),
+    ("Audi e-tron",            "vehicle"),
+    ("Mercedes EQS",           "vehicle"),
+    ("Honda CR-V",             "vehicle"),
+    ("Toyota RAV4 Prime",      "vehicle"),
+    # Smart locks — real product names
+    ("Yale Assure",            "smart-lock"),
+    ("August Lock",            "smart-lock"),
+    ("Schlage Encode",         "smart-lock"),
+    ("Level Lock",             "smart-lock"),
+    # Audio — common headphones/speakers
+    ("AirPods Pro",            "audio"),
+    ("AirPods Max",            "audio"),
+    ("Bose QC45",              "audio"),
+    ("Sonos Move",             "audio"),
+    ("JBL Flip 6",             "audio"),
+    ("Beats Studio",           "audio"),
+    ("Marshall Major",         "audio"),
+    # IoT — common smart-home hubs
+    ("Hue Bridge",             "smart-home"),
+    ("Nest Mini",              "smart-home"),
+    ("Echo Dot",               "smart-home"),
+    ("Chromecast",             "smart-home"),
+    # Wearables
+    ("Apple Watch",            "wearable"),
+    ("Garmin Fenix",           "wearable"),
+    ("Fitbit Charge",          "wearable"),
+    ("WHOOP 4.0",              "wearable"),
+    # Phones / tablets / TVs
+    ("iPhone 15 Pro",          "phone"),
+    ("Galaxy S24",             "phone"),
+    ("iPad Air",               "tablet"),
+    ("LG OLED TV",             "tv"),
+    ("Samsung Soundbar",       "tv"),
 ]
 
 

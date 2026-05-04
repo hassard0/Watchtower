@@ -742,14 +742,20 @@ class Analytics:
             ).fetchone()
             if airtag:
                 entity_id, last_seen, avg_rssi = airtag
-                close = avg_rssi is not None and avg_rssi > -65
-                severity = "high" if (home_state == "away" or close) else "medium"
-                _fire("airtag_findmy_present", severity, entity_id, 0.7 if close else 0.5, {
-                    "avg_rssi": avg_rssi,
-                    "home_state": home_state,
-                    "explanation": "Apple Find-My (AirTag, lost AirPods, etc.) broadcast detected near property. "
-                                   "If this is yours, mark it as known.",
-                })
+                # Only fire when the Find-My broadcast is *close* — Apple devices
+                # in range from a neighbor's apartment etc. are noise. Require
+                # avg_rssi > -65 dBm (~10-15m through walls) to alert.
+                if avg_rssi is not None and avg_rssi > -65:
+                    severity = "high" if home_state == "away" else "medium"
+                    _fire("airtag_findmy_present", severity, entity_id, 0.7, {
+                        "avg_rssi": avg_rssi,
+                        "home_state": home_state,
+                        "explanation": (
+                            "Apple Find-My (AirTag / lost AirPods / Find-My-enabled device) "
+                            "broadcasting strongly close to the Pi (RSSI > -65 dBm). "
+                            "If this is yours, mark it as known."
+                        ),
+                    })
 
         # ---- Rule 4: first-time visitor at after-hours ----
         # Skip if no anchors are enrolled (we can't reason about who "should" be here).

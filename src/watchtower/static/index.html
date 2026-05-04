@@ -1215,6 +1215,13 @@ tailwind.config = {
             </div>
           </div>
 
+          <!-- decoded continuity state, if any -->
+          <div x-show="entityDetail.entity?.notes_inferred"
+               class="mb-4 px-3 py-2 rounded-lg bg-signal-deep/10 border border-signal-deep/30">
+            <div class="text-[10px] uppercase tracking-widest text-signal-glow mb-1">Live state</div>
+            <div class="text-xs font-mono text-slate-300" x-text="entityDetail.entity?.notes_inferred"></div>
+          </div>
+
           <!-- stats grid -->
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
             <div class="glass rounded-lg p-3">

@@ -43,7 +43,8 @@ UUID_MODEL = "00002a24-0000-1000-8000-00805f9b34fb"
 UUID_FW = "00002a26-0000-1000-8000-00805f9b34fb"
 UUID_SERIAL = "00002a25-0000-1000-8000-00805f9b34fb"
 
-PROBE_TIMEOUT_SEC = 6.0
+PROBE_TIMEOUT_SEC = 5.0
+PER_CHAR_READ_TIMEOUT_SEC = 1.5
 COOLDOWN_SUCCESS_SEC = 7 * 86400   # don't re-probe successful entities for a week
 COOLDOWN_FAILURE_SEC = 24 * 3600   # don't re-probe failed entities for a day
 
@@ -58,57 +59,77 @@ def _mark_outgoing(mac: str) -> None:
         pass
 
 
+async def _connect_and_read(mac: str, adapter: str | None) -> dict:
+    """Inner connect-and-read. Bails early once name + mfr are populated to
+    avoid waiting on read timeouts for devices that don't expose model/fw/serial."""
+    out: dict = {"ok": False, "name": None, "mfr": None, "model": None,
+                 "fw": None, "serial": None, "error": None}
+    async with BleakClient(mac, timeout=PROBE_TIMEOUT_SEC, adapter=adapter) as client:
+        for key, uuid in (
+            ("name", UUID_DEVICE_NAME),
+            ("mfr", UUID_MFR_NAME),
+            ("model", UUID_MODEL),
+            ("fw", UUID_FW),
+            ("serial", UUID_SERIAL),
+        ):
+            try:
+                data = await asyncio.wait_for(
+                    client.read_gatt_char(uuid),
+                    timeout=PER_CHAR_READ_TIMEOUT_SEC,
+                )
+                out[key] = data.decode("utf-8", errors="replace").strip("\x00").strip() or None
+            except (BleakError, asyncio.TimeoutError, OSError):
+                pass
+            except Exception:  # noqa: BLE001
+                log.exception("probe: read failed for %s on %s", uuid, mac)
+            # Fast bail: if we have name + manufacturer, that's plenty.
+            if out["name"] and out["mfr"] and key in ("mfr", "model"):
+                break
+        out["ok"] = any(out[k] for k in ("name", "mfr", "model"))
+    return out
+
+
 async def probe_one(mac: str, adapter: str | None = "hci0", pause_scanner=None) -> dict:
     """Connect to MAC, read characteristics, return dict.
 
-    `pause_scanner`, if given, is an async-context-manager factory that
-    coordinates with the passive BLE scanner so it briefly yields the
-    adapter (BlueZ doesn't reliably allow concurrent scan + connect).
+    Strategy: try connecting WITHOUT pausing the BLE scanner first (modern
+    BlueZ + bleak usually handles concurrent scan+connect fine). If we hit
+    "operation already in progress" or similar, retry once with the scanner
+    paused via `pause_scanner` if provided.
 
     Returns: {"ok": bool, "name", "mfr", "model", "fw", "serial", "error"}
     """
     out: dict = {"ok": False, "name": None, "mfr": None, "model": None,
                  "fw": None, "serial": None, "error": None}
-    if pause_scanner is None:
-        from contextlib import asynccontextmanager
-        @asynccontextmanager
-        async def _noop():
-            yield
-        pause_ctx = _noop()
-    else:
-        pause_ctx = await pause_scanner()
     _mark_outgoing(mac)
+    # First attempt: no pause — much faster (avoids the ~3-5s scanner restart).
     try:
-        async with pause_ctx:
+        return await _connect_and_read(mac, adapter)
+    except (BleakError, asyncio.TimeoutError, OSError) as e:
+        msg = str(e).lower()
+        # Recognizable "scanner-conflict" errors — retry with pause.
+        is_busy = ("already in progress" in msg or "busy" in msg or
+                   "in-progress" in msg or "operation already" in msg)
+        if not is_busy or pause_scanner is None:
+            out["error"] = str(e)[:200]
+            return out
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:200]
+        log.exception("probe: unexpected error for %s", mac)
+        return out
+    # Retry path: pause the scanner and try once more.
+    try:
+        async with await pause_scanner():
             try:
-                async with BleakClient(mac, timeout=PROBE_TIMEOUT_SEC, adapter=adapter) as client:
-                    for key, uuid in (
-                        ("name", UUID_DEVICE_NAME),
-                        ("mfr", UUID_MFR_NAME),
-                        ("model", UUID_MODEL),
-                        ("fw", UUID_FW),
-                        ("serial", UUID_SERIAL),
-                    ):
-                        try:
-                            data = await asyncio.wait_for(
-                                client.read_gatt_char(uuid),
-                                timeout=2.0,
-                            )
-                            out[key] = data.decode("utf-8", errors="replace").strip("\x00").strip() or None
-                        except (BleakError, asyncio.TimeoutError, OSError):
-                            pass
-                        except Exception:  # noqa: BLE001
-                            log.exception("probe: read failed for %s on %s", uuid, mac)
-                    out["ok"] = any(out[k] for k in ("name", "mfr", "model"))
+                return await _connect_and_read(mac, adapter)
             except (BleakError, asyncio.TimeoutError, OSError) as e:
                 out["error"] = str(e)[:200]
             except Exception as e:  # noqa: BLE001
                 out["error"] = str(e)[:200]
-                log.exception("probe: unexpected error for %s", mac)
-        return out
+                log.exception("probe: retry failed for %s", mac)
     except Exception as e:  # noqa: BLE001
         out["error"] = out.get("error") or str(e)[:200]
-        return out
+    return out
 
 
 def _load_attempts(conn) -> dict:

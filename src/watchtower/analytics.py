@@ -178,38 +178,17 @@ def _hour_of_week(ts_unix: int) -> int:
 
 
 def _apple_continuity_kind(mfr_hex: str) -> str | None:
-    """Decode Apple Continuity manufacturer data type byte. Returns a stable subtype label or None.
+    """Decode Apple Continuity manufacturer data; return a stable group label.
 
-    Apple Continuity encoding: bytes 0..1 = vendor_id LE = 0x4C00 (Apple),
-    byte 2 = subtype, byte 3 = subtype length.
+    For AirPods/Beats with a recognized model number, we return the SPECIFIC
+    model (e.g., "AirPods-Pro-2") so each model collapses to its own entity.
+    For other subtypes we return the subtype name. None for non-Apple data.
     """
-    if not mfr_hex or len(mfr_hex) < 6:
+    from watchtower.apple_continuity import decode_continuity, label_for_decoded
+    decoded = decode_continuity(mfr_hex or "")
+    if not decoded:
         return None
-    if not mfr_hex.lower().startswith("4c00"):
-        return None
-    try:
-        subtype = mfr_hex[4:6]
-    except IndexError:
-        return None
-    return {
-        "01": "iCloud",
-        "02": "iBeacon",
-        "03": "AirPrint",
-        "05": "AirDrop",
-        "06": "HomeKit",
-        "07": "AirPods/Proximity",
-        "08": "Hey-Siri",
-        "09": "AirPlay",
-        "0a": "Magic-Switch",
-        "0b": "Watch-Connection",
-        "0c": "Handoff",
-        "0d": "Tethering-Target",
-        "0e": "Tethering-Source",
-        "0f": "Nearby-Action",
-        "10": "Nearby-Info",
-        "12": "Find-My",
-        "16": "AirPods-Connected",
-    }.get(subtype.lower())
+    return label_for_decoded(decoded).replace("/", "-")
 
 
 def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
@@ -389,6 +368,17 @@ class Analytics:
                 e["first"] = ts_unix if e["first"] is None else min(e["first"], ts_unix)
                 e["last"] = ts_unix if e["last"] is None else max(e["last"], ts_unix)
                 e["obs"] += 1
+                # If this is Apple Continuity, decode and remember most recent state.
+                if scanner == "ble_scanner":
+                    mfr_hex = feats.get("manufacturer_data_hex") or ""
+                    if mfr_hex.lower().startswith("4c00"):
+                        from watchtower.apple_continuity import decode_continuity, short_state_summary
+                        decoded = decode_continuity(mfr_hex)
+                        if decoded:
+                            e.setdefault("continuity_state", "")
+                            summary = short_state_summary(decoded)
+                            if summary:
+                                e["continuity_state"] = summary
                 rssi_int = None
                 rssi = feats.get("rssi")
                 if rssi is not None:
@@ -409,11 +399,13 @@ class Analytics:
                 avg = sum(rssis) / len(rssis) if rssis else None
                 lo = min(rssis) if rssis else None
                 hi = max(rssis) if rssis else None
+                continuity_state = e.get("continuity_state")
                 conn.execute("""
                     INSERT INTO entities (
                         entity_id, scanner, kind, first_seen_unix, last_seen_unix,
-                        visit_count, total_observations, is_random_mac, avg_rssi, min_rssi, max_rssi, vendor, friendly_name
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                        visit_count, total_observations, is_random_mac, avg_rssi, min_rssi, max_rssi,
+                        vendor, friendly_name, notes_inferred
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(entity_id) DO UPDATE SET
                         scanner = excluded.scanner,
                         kind = excluded.kind,
@@ -426,10 +418,11 @@ class Analytics:
                         min_rssi = MIN(COALESCE(entities.min_rssi, excluded.min_rssi), COALESCE(excluded.min_rssi, entities.min_rssi)),
                         max_rssi = MAX(COALESCE(entities.max_rssi, excluded.max_rssi), COALESCE(excluded.max_rssi, entities.max_rssi)),
                         vendor = COALESCE(entities.vendor, excluded.vendor),
-                        friendly_name = COALESCE(entities.friendly_name, excluded.friendly_name)
+                        friendly_name = COALESCE(entities.friendly_name, excluded.friendly_name),
+                        notes_inferred = COALESCE(excluded.notes_inferred, entities.notes_inferred)
                 """, (eid, e["scanner"], e["kind"], e["first"], e["last"],
                       e["obs"], 1 if e["is_random_mac"] else 0 if e["is_random_mac"] is False else None,
-                      avg, lo, hi, e["vendor"], e["name"]))
+                      avg, lo, hi, e["vendor"], e["name"], continuity_state))
 
             # Update baseline_stats with Welford for scanner counts (per hour-of-week).
             for (scanner, hw), cnt in scanner_hour_counts.items():
@@ -826,7 +819,7 @@ class Analytics:
             airtag = conn.execute(
                 """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
                    FROM entities e
-                   WHERE e.entity_id = 'ble:apple:Find-My'
+                   WHERE e.entity_id IN ('ble:apple:Find-My', 'ble:apple:find-my')
                      AND e.last_seen_unix > ?
                      AND e.classification IS NULL""",
                 (now - 600,),

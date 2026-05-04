@@ -10,6 +10,7 @@ function watchtower() {
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
     findmyData: { observers: [], distinct_count: 0, by_status: {}, daily_presence: [] },
+    findmyClusters: [],
     findmyWindowSec: 300,
     zones: [],
     // Per-tab loading state. true while fetching.
@@ -227,10 +228,36 @@ function watchtower() {
 
     async loadFindmy() {
       try {
-        const r = await fetch(`/api/findmy/observers?window=${this.findmyWindowSec}`);
-        this.findmyData = await r.json();
+        const [obsR, clusR] = await Promise.all([
+          fetch(`/api/findmy/observers?window=${this.findmyWindowSec}`),
+          fetch('/api/findmy/clusters?active_only=1'),
+        ]);
+        this.findmyData = await obsR.json();
+        const cj = await clusR.json();
+        this.findmyClusters = cj.clusters || [];
         this.tabsLoaded = { ...this.tabsLoaded, findmy: true };
       } catch (e) { console.warn('loadFindmy', e); }
+    },
+
+    async labelCluster(cid, label) {
+      try {
+        await fetch(`/api/findmy/clusters/${cid}/label`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ label }),
+        });
+        this.loadFindmy();
+      } catch (e) { console.warn(e); }
+    },
+
+    async markCluster(cid, classification) {
+      if (!classification) return;
+      try {
+        await fetch(`/api/findmy/clusters/${cid}/label`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ classification }),
+        });
+        this.loadFindmy();
+      } catch (e) { console.warn(e); }
     },
 
     async loadSpectrum() {

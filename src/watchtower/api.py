@@ -96,6 +96,9 @@ class ApiServer:
         self._app.router.add_get("/api/findmy/tracker", self.findmy_tracker_status)
         # Find-My listener — live view of nearby AirTag/Find-My broadcasts
         self._app.router.add_get("/api/findmy/observers", self.findmy_observers)
+        # Find-My stable clusters — joined across MAC rotations
+        self._app.router.add_get("/api/findmy/clusters", self.findmy_clusters_list)
+        self._app.router.add_post("/api/findmy/clusters/{cid}/label", self.findmy_clusters_label)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
@@ -1068,6 +1071,53 @@ class ApiServer:
             "observers": observers,
             "daily_presence": daily,
         })
+
+    async def findmy_clusters_list(self, request: web.Request) -> web.Response:
+        """Stable Find-My clusters joined across rotating MAC handoffs."""
+        active_only = request.query.get("active_only", "1") == "1"
+        now = int(time.time())
+        cutoff = now - (3600 if active_only else 7 * 86400)
+        with get_connection(self._db) as conn:
+            cursor = conn.execute("""
+                SELECT c.cluster_id, c.first_seen_unix, c.last_seen_unix,
+                       c.sighting_count, c.rotation_count, c.last_rssi, c.avg_rssi,
+                       c.last_status, c.last_mac, c.classification, c.user_label,
+                       c.inferred_owner_anchor, c.inferred_owner_score, c.notes,
+                       e.friendly_name AS owner_friendly_name
+                FROM findmy_clusters c
+                LEFT JOIN entities e ON e.entity_id = c.inferred_owner_anchor
+                WHERE c.last_seen_unix > ?
+                ORDER BY c.last_seen_unix DESC, c.sighting_count DESC
+                LIMIT 100
+            """, (cutoff,))
+            cols = [c[0] for c in cursor.description]
+            rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        # Add a derived best-guess label for each cluster.
+        for r in rows:
+            r["display_label"] = (
+                r.get("user_label")
+                or (f"AirTag (probably {r['owner_friendly_name'] or r['inferred_owner_anchor']}'s)"
+                    if r.get("inferred_owner_anchor") else None)
+                or f"unidentified tracker · {r['last_status'] or 'unknown'}"
+            )
+            r["seconds_since_seen"] = now - (r.get("last_seen_unix") or 0)
+        return web.json_response({"ts_unix": now, "clusters": rows})
+
+    async def findmy_clusters_label(self, request: web.Request) -> web.Response:
+        cid = request.match_info["cid"]
+        body = await request.json()
+        label = (body.get("label") or "").strip() or None
+        classification = body.get("classification")
+        if classification not in (None, "known", "suspicious", "enrolled"):
+            return web.json_response({"error": "invalid classification"}, status=400)
+        with get_connection(self._db) as conn:
+            cur = conn.execute(
+                "UPDATE findmy_clusters SET user_label = ?, classification = COALESCE(?, classification) WHERE cluster_id = ?",
+                (label, classification, cid),
+            )
+            if cur.rowcount == 0:
+                return web.json_response({"error": "cluster not found"}, status=404)
+        return web.json_response({"ok": True})
 
     async def findmy_tracker_status(self, request: web.Request) -> web.Response:
         if self._findmy_tracker is None:

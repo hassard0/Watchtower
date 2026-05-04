@@ -135,6 +135,42 @@ CREATE TABLE IF NOT EXISTS probe_captures (
 );
 CREATE INDEX IF NOT EXISTS idx_probe_captures_status ON probe_captures(status);
 
--- Set schema version to 3 (idempotent migration).
-DELETE FROM schema_meta WHERE version < 3;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (3);
+-- v4: Find-My cluster tracking. Apple rotates Find-My keys ~every 15 min so
+-- we can't ID a specific tracker by MAC over time. We can cluster across
+-- rotations using RSSI continuity (same RSSI, ~simultaneous MAC handoff)
+-- and assign a stable internal ID. Co-presence with anchors then gives us
+-- inferred ownership.
+
+CREATE TABLE IF NOT EXISTS findmy_clusters (
+    cluster_id              TEXT PRIMARY KEY,
+    first_seen_unix         INTEGER NOT NULL,
+    last_seen_unix          INTEGER NOT NULL,
+    sighting_count          INTEGER NOT NULL DEFAULT 0,
+    rotation_count          INTEGER NOT NULL DEFAULT 0,  -- distinct rotating MACs we've seen
+    last_rssi               INTEGER,
+    avg_rssi                REAL,
+    last_status             TEXT,
+    last_mac                TEXT,
+    classification          TEXT,                         -- null | known | suspicious | enrolled
+    user_label              TEXT,                          -- user-provided name
+    inferred_owner_anchor   TEXT,                          -- entity_id of associated anchor
+    inferred_owner_score    REAL,                          -- co-presence correlation 0..1
+    notes                   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_findmy_clusters_last_seen ON findmy_clusters(last_seen_unix);
+CREATE INDEX IF NOT EXISTS idx_findmy_clusters_owner ON findmy_clusters(inferred_owner_anchor);
+
+-- Map of rotating MAC → cluster (so a returning MAC quickly hits its cluster).
+CREATE TABLE IF NOT EXISTS findmy_cluster_macs (
+    rotating_mac    TEXT PRIMARY KEY,
+    cluster_id      TEXT NOT NULL,
+    first_seen_unix INTEGER NOT NULL,
+    last_seen_unix  INTEGER NOT NULL,
+    sighting_count  INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (cluster_id) REFERENCES findmy_clusters(cluster_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_findmy_cluster_macs_cluster ON findmy_cluster_macs(cluster_id);
+
+-- Set schema version to 4 (idempotent migration).
+DELETE FROM schema_meta WHERE version < 4;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (4);

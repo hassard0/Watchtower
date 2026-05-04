@@ -383,6 +383,14 @@ class Analytics:
                             summary = short_state_summary(decoded)
                             if summary:
                                 e["continuity_state"] = summary
+                    # Find-My-specific cluster tracking (across rotating MACs).
+                    if mfr_hex.lower().startswith("4c0012"):
+                        from watchtower.findmy_clusters import process_findmy_event
+                        try:
+                            process_findmy_event(conn, feats.get("mac"), mfr_hex,
+                                                 feats.get("rssi"), ts_unix)
+                        except Exception:  # noqa: BLE001
+                            log.exception("findmy: cluster processing failed")
                 rssi_int = None
                 rssi = feats.get("rssi")
                 if rssi is not None:
@@ -471,6 +479,26 @@ class Analytics:
 
             # Compute regularity + anomaly scores for ALL entities (cheap).
             self._score_entities(conn)
+
+            # Recompute Find-My cluster co-presence inference once a minute or
+            # so. It's a moderately expensive query so we throttle.
+            try:
+                from watchtower.findmy_clusters import update_cluster_inferences, prune_old_clusters
+                state_row = conn.execute(
+                    "SELECT updated_unix FROM analytics_state WHERE key = 'findmy_inference_last_run'"
+                ).fetchone()
+                last_run = state_row[0] if state_row else 0
+                if (now - last_run) > 60:
+                    update_cluster_inferences(conn)
+                    prune_old_clusters(conn)
+                    conn.execute(
+                        "INSERT INTO analytics_state(key, value, updated_unix) "
+                        "VALUES('findmy_inference_last_run', '', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET updated_unix = excluded.updated_unix",
+                        (now,),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("findmy: cluster inference failed")
 
             # Evaluate rules → alerts.
             self._evaluate_rules(conn)

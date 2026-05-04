@@ -732,6 +732,62 @@ tailwind.config = {
         </template>
       </div>
 
+      <!-- STABLE CLUSTERS — same physical tracker across MAC rotations -->
+      <div class="glass rounded-2xl p-4 mb-3" x-show="(findmyClusters || []).length > 0">
+        <div class="flex items-baseline justify-between mb-2">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Stable trackers (clustered across MAC rotations)</div>
+            <div class="text-sm">Inferred owner via co-presence with anchors · last hour</div>
+          </div>
+          <div class="text-[10px] text-slate-500"><span x-text="findmyClusters.length"></span> clusters</div>
+        </div>
+        <div class="space-y-1.5">
+          <template x-for="c in findmyClusters" :key="c.cluster_id">
+            <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-700/30 hover:bg-ink-700/50 transition">
+              <!-- co-presence ring -->
+              <div class="relative w-9 h-9 flex-shrink-0">
+                <div class="absolute inset-0 rounded-full anomaly-ring"
+                     :style="`--score: ${c.inferred_owner_score || 0}; --ring-color: ${c.inferred_owner_anchor ? '#5dd0a8' : '#ff5470'}`"></div>
+                <div class="absolute inset-1 rounded-full bg-ink-900 flex items-center justify-center text-[9px] num font-bold"
+                     :style="`color: ${c.inferred_owner_anchor ? '#5dd0a8' : '#ff5470'}`"
+                     x-text="Math.round((c.inferred_owner_score || 0) * 100) + '%'"></div>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-medium text-sm" x-text="c.display_label"></span>
+                  <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded"
+                        :class="findmyStatusClass(c.last_status)"
+                        x-text="c.last_status || '—'"></span>
+                  <span x-show="c.classification" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/15 text-signal-glow" x-text="c.classification"></span>
+                </div>
+                <div class="text-[10px] text-slate-500 num truncate">
+                  <span x-text="c.rotation_count + ' rotations · ' + c.sighting_count + ' sightings'"></span>
+                  <span class="mx-1 text-slate-700">·</span>
+                  <span x-text="(c.last_rssi != null ? c.last_rssi : '—') + ' dBm'"></span>
+                  <span class="mx-1 text-slate-700">·</span>
+                  <span x-text="'first seen ' + relTime(c.first_seen_unix)"></span>
+                </div>
+              </div>
+              <input type="text" placeholder="give it a name…" :value="c.user_label || ''"
+                     @blur="labelCluster(c.cluster_id, $event.target.value)"
+                     class="w-32 sm:w-40 bg-ink-800/40 border border-ink-600/40 rounded px-2 py-1 text-xs">
+              <select @change="markCluster(c.cluster_id, $event.target.value); $event.target.value=''"
+                      class="text-[10px] uppercase tracking-wider bg-ink-700/40 border border-ink-600/40 rounded px-1.5 py-1">
+                <option value="">…</option>
+                <option value="known">Known</option>
+                <option value="suspicious">Suspicious</option>
+                <option value="enrolled">Enrolled</option>
+              </select>
+            </div>
+          </template>
+        </div>
+        <div class="mt-2 text-[10px] text-slate-500">
+          Green ring = inferred owner found via co-presence with an anchor.
+          Red = no anchor matches (potentially stalker tracker if persistent).
+          Numbers show co-presence Jaccard similarity score.
+        </div>
+      </div>
+
       <!-- live tracker list -->
       <div class="glass rounded-2xl overflow-hidden" x-show="(findmyData.observers || []).length > 0">
         <div class="px-4 py-2.5 border-b border-ink-600/40 flex items-baseline justify-between">

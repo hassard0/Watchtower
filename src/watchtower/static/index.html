@@ -642,6 +642,71 @@ tailwind.config = {
     </section>
 
     <!-- =================================================================== -->
+    <!-- TAB: SETTINGS                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'settings'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500">Settings</div>
+            <div class="text-base font-semibold">Tune the experience</div>
+          </div>
+          <div x-show="settingsDirty" class="flex items-center gap-2">
+            <button @click="loadSettings()" class="text-xs px-3 py-1.5 rounded border border-ink-600 text-slate-400">discard</button>
+            <button @click="saveSettings()" class="text-xs px-3 py-1.5 rounded bg-signal-pulse text-ink-900 font-semibold">save changes</button>
+          </div>
+          <div x-show="!settingsDirty" class="text-[10px] text-slate-500">all changes saved</div>
+        </div>
+      </div>
+
+      <!-- THRESHOLDS -->
+      <div class="glass rounded-2xl p-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection thresholds</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <template x-for="key in ['linger_threshold_sec', 'anchor_timeout_sec', 'close_perimeter_rssi_dbm', 'after_hours_start_utc', 'after_hours_end_utc', 'anomaly_severity_high_threshold', 'anomaly_severity_medium_threshold']" :key="key">
+            <div>
+              <label class="block">
+                <div class="flex items-baseline justify-between mb-1">
+                  <span class="text-xs font-medium" x-text="settingsLabel(key)"></span>
+                  <span class="text-[10px] text-slate-500" x-text="settingsHint(key)"></span>
+                </div>
+                <input type="number" :step="settingsStep(key)" x-model.number="settings[key]" @input="settingsDirty = true"
+                       class="w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-signal-glow/40">
+              </label>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- RULES -->
+      <div class="glass rounded-2xl p-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection rules</div>
+        <div class="space-y-2">
+          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot']" :key="key">
+            <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
+              <input type="checkbox" x-model="settings[key]" @change="settingsDirty = true"
+                     class="w-4 h-4 mt-0.5 rounded accent-signal-pulse">
+              <div class="flex-1">
+                <div class="text-sm font-medium" x-text="ruleLabel(key)"></div>
+                <div class="text-[11px] text-slate-500" x-text="ruleDescription(key)"></div>
+              </div>
+            </label>
+          </template>
+        </div>
+      </div>
+
+      <!-- DANGER ZONE -->
+      <div class="glass rounded-2xl p-5 border border-threat/20">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Database tools</div>
+        <div class="flex flex-wrap gap-2">
+          <button @click="resetEntities()" class="text-xs px-3 py-2 rounded border border-ink-600 text-slate-300 hover:border-signal-warm/40 hover:text-signal-warm">reset entities</button>
+          <button @click="ackAllAlerts()" class="text-xs px-3 py-2 rounded border border-ink-600 text-slate-300 hover:border-signal-glow/40 hover:text-signal-glow">acknowledge all alerts</button>
+        </div>
+        <div class="text-[10px] text-slate-600 mt-2">Reset entities clears the entity table and rebuilds it from raw_events on the next analytics tick. Useful after a big enrollment change.</div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
     <!-- TAB: ALERTS                                                           -->
     <!-- =================================================================== -->
     <section x-show="tab === 'alerts'" class="animate-fade-in">

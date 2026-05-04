@@ -8,6 +8,9 @@ function watchtower() {
     discoveryCandidates: [],
     spectrum: { midband_samples: [], subghz_decodes: [] },
     zones: [],
+    settings: {},
+    settingsSchema: {},
+    settingsDirty: false,
     entityDetail: null,
     loading: false,
     now: '',
@@ -24,6 +27,7 @@ function watchtower() {
       { id: 'spectrum',  label: 'Spectrum',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h2l3-9 6 18 3-9h6"/></svg>' },
       { id: 'zones',     label: 'Zones',     icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
       { id: 'alerts',    label: 'Alerts',    icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>' },
+      { id: 'settings',  label: 'Settings',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' },
     ],
 
     scopeBtns: [
@@ -70,6 +74,7 @@ function watchtower() {
         if (this.tab === 'spectrum')  tasks.push(this.loadSpectrum());
         if (this.tab === 'zones')     tasks.push(this.loadZones());
         if (this.tab === 'discover')  tasks.push(this.loadDiscovery());
+        if (this.tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
         await Promise.all(tasks);
       } finally {
         this.loading = false;
@@ -130,6 +135,93 @@ function watchtower() {
         const j = await r.json();
         this.discoveryCandidates = j.candidates || [];
       } catch (e) { console.warn('loadDiscovery', e); }
+    },
+
+    async loadSettings() {
+      try {
+        const r = await fetch('/api/settings');
+        const j = await r.json();
+        this.settings = j.settings;
+        this.settingsSchema = j.schema || {};
+        this.settingsDirty = false;
+      } catch (e) { console.warn('loadSettings', e); }
+    },
+
+    async saveSettings() {
+      try {
+        const r = await fetch('/api/settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(this.settings),
+        });
+        if (!r.ok) throw new Error('save failed');
+        const j = await r.json();
+        this.settings = j.settings;
+        this.settingsDirty = false;
+      } catch (e) { alert('save failed: ' + e.message); }
+    },
+
+    settingsLabel(key) {
+      return ({
+        'linger_threshold_sec': 'Linger threshold',
+        'anchor_timeout_sec': 'Anchor timeout',
+        'close_perimeter_rssi_dbm': 'Close-perimeter RSSI',
+        'after_hours_start_utc': 'After-hours start (UTC)',
+        'after_hours_end_utc': 'After-hours end (UTC)',
+        'anomaly_severity_high_threshold': 'High-severity score',
+        'anomaly_severity_medium_threshold': 'Medium-severity score',
+      })[key] || key;
+    },
+    settingsHint(key) {
+      return ({
+        'linger_threshold_sec': 'seconds',
+        'anchor_timeout_sec': 'seconds',
+        'close_perimeter_rssi_dbm': 'dBm (higher = closer)',
+        'after_hours_start_utc': 'hour 0–23',
+        'after_hours_end_utc': 'hour 0–23',
+        'anomaly_severity_high_threshold': '0.0–1.0',
+        'anomaly_severity_medium_threshold': '0.0–1.0',
+      })[key] || '';
+    },
+    settingsStep(key) {
+      if (key.includes('threshold') && !key.includes('sec')) return '0.05';
+      return '1';
+    },
+    ruleLabel(key) {
+      return ({
+        'rule_anchor_absent_unknown_linger': 'Anchor absent + unknown lingering',
+        'rule_unknown_keyfob_emission':      'Unknown key-fob emission (sub-GHz)',
+        'rule_unknown_garage_emission':      'Unknown garage-door emission (sub-GHz)',
+        'rule_airtag_findmy_present':        'Apple Find-My / AirTag broadcast',
+        'rule_first_time_visitor_after_hours': 'First-time visitor after hours',
+        'rule_close_unknown_signal':         'Strong-signal unknown nearby',
+        'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
+      })[key] || key;
+    },
+    ruleDescription(key) {
+      return ({
+        'rule_anchor_absent_unknown_linger': 'Fires when an unknown entity is present > linger threshold while no anchor is home.',
+        'rule_unknown_keyfob_emission':      'Fires on unrecognized 315/433 MHz key-fob protocol activity.',
+        'rule_unknown_garage_emission':      'Fires on unrecognized 315/390 MHz garage-door protocol activity.',
+        'rule_airtag_findmy_present':        'Fires on Apple Find-My broadcasts near the Pi.',
+        'rule_first_time_visitor_after_hours': 'New entity first-seen after-hours window. Requires at least one anchor enrolled.',
+        'rule_close_unknown_signal':         'Mobile BLE device with very strong RSSI and recurring presence.',
+        'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
+      })[key] || '';
+    },
+    async resetEntities() {
+      if (!confirm('Wipe entities/visits and rebuild from raw_events on next analytics tick?')) return;
+      try {
+        await fetch('/api/admin/reset-entities', { method: 'POST' });
+        await this.refresh();
+      } catch (e) { alert('failed: ' + e.message); }
+    },
+    async ackAllAlerts() {
+      if (!confirm('Mark all alerts acknowledged?')) return;
+      try {
+        await fetch('/api/alerts/ack-all', { method: 'POST' });
+        await this.loadAlerts();
+        await this.loadState();
+      } catch (e) { alert('failed: ' + e.message); }
     },
 
     async quickClassify(c, classification) {

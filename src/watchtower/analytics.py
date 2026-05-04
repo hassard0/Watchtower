@@ -27,12 +27,58 @@ from watchtower.storage.db import get_connection
 
 log = logging.getLogger(__name__)
 
-# Roll-up tunables (sensible v1 defaults; will move to dwelling_profile later).
+# Roll-up tunables (sensible v1 defaults; mirrored in DEFAULT_SETTINGS for runtime override).
 VISIT_GAP_SEC = 300         # 5 min gap closes a visit
 LINGER_THRESHOLD_SEC = 600  # 10 min linger = casing-class
 ANCHOR_TIMEOUT_SEC = 600    # anchor absent > 10 min = "away"
 RECENT_RSSI_FLOOR_DBM = -85 # ignore very-far devices for anomaly
 SUBGHZ_HISTORICAL_RATIO = 5 # if we see >5x the historical rate of an unknown subghz protocol, flag
+
+DEFAULT_SETTINGS = {
+    "linger_threshold_sec": 600,
+    "anchor_timeout_sec": 600,
+    "close_perimeter_rssi_dbm": -50,
+    "after_hours_start_utc": 22,
+    "after_hours_end_utc": 6,
+    "rule_anchor_absent_unknown_linger": True,
+    "rule_unknown_keyfob_emission": True,
+    "rule_unknown_garage_emission": True,
+    "rule_airtag_findmy_present": True,
+    "rule_first_time_visitor_after_hours": True,
+    "rule_close_unknown_signal": True,
+    "rule_rogue_hotspot": True,
+    "anomaly_severity_high_threshold": 0.6,
+    "anomaly_severity_medium_threshold": 0.4,
+}
+
+
+def load_settings(db_path) -> dict:
+    """Read overrides from analytics_state.settings_json; merge over defaults."""
+    out = dict(DEFAULT_SETTINGS)
+    try:
+        with get_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM analytics_state WHERE key = 'settings_json'"
+            ).fetchone()
+            if row and row[0]:
+                overrides = json.loads(row[0])
+                for k, v in overrides.items():
+                    if k in out:
+                        out[k] = v
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def save_settings(db_path, settings: dict) -> None:
+    """Persist settings overrides."""
+    cleaned = {k: v for k, v in settings.items() if k in DEFAULT_SETTINGS}
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "INSERT INTO analytics_state(key, value, updated_unix) VALUES ('settings_json', ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_unix = excluded.updated_unix",
+            (json.dumps(cleaned), int(time.time())),
+        )
 
 
 def _hour_of_week(ts_unix: int) -> int:
@@ -578,10 +624,17 @@ class Analytics:
         """Fire alerts for entities meeting rule criteria. Dedupe by (rule_id, entity_id, 5-min window)."""
         now = int(time.time())
         recent_threshold = now - 300
+        S = load_settings(self._db)
+
+        anchor_timeout = S["anchor_timeout_sec"]
+        linger_threshold = S["linger_threshold_sec"]
+        close_perim_rssi = S["close_perimeter_rssi_dbm"]
+        after_start = S["after_hours_start_utc"]
+        after_end = S["after_hours_end_utc"]
 
         anchor_present = conn.execute(
             "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
-            (now - ANCHOR_TIMEOUT_SEC,),
+            (now - anchor_timeout,),
         ).fetchone()
         any_anchor_enrolled = conn.execute(
             "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
@@ -596,8 +649,10 @@ class Analytics:
 
         # Hour-of-day for after-hours boost (local-time would be ideal but UTC works for v1).
         hour_utc = (now // 3600) % 24
-        # Treat 22:00-06:00 UTC as "after hours" (user can refine for their tz).
-        is_after_hours = hour_utc >= 22 or hour_utc < 6
+        if after_start <= after_end:
+            is_after_hours = after_start <= hour_utc < after_end
+        else:  # wraps midnight, e.g. 22:00 -> 06:00
+            is_after_hours = hour_utc >= after_start or hour_utc < after_end
 
         def _fire(rule_id, severity, entity_id, score, evidence):
             existing = conn.execute(
@@ -615,7 +670,7 @@ class Analytics:
 
         # ---- Rule 1: anchor_absent_unknown_linger ----
         # Only meaningful if we know who's home — i.e., at least one anchor enrolled.
-        if any_anchor_enrolled:
+        if any_anchor_enrolled and S["rule_anchor_absent_unknown_linger"]:
             candidates = conn.execute(
                 """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi, e.anomaly_score, e.regularity,
                           (SELECT MAX(duration_sec) FROM entity_visits v WHERE v.entity_id = e.entity_id AND v.end_unix > ?) AS longest_recent
@@ -626,7 +681,7 @@ class Analytics:
                 (now - 600, now - 120),
             ).fetchall()
             for entity_id, last_seen, avg_rssi, anomaly, regularity, longest in candidates:
-                if longest is None or longest < LINGER_THRESHOLD_SEC:
+                if longest is None or longest < linger_threshold:
                     continue
                 severity = "high" if (home_state == "away" and anomaly >= 0.6) else "medium"
                 _fire("anchor_absent_unknown_linger", severity, entity_id, anomaly, {
@@ -640,6 +695,8 @@ class Analytics:
         # ---- Rule 2: sub-GHz keyfob / garage emission from unknown source ----
         for kind, rule in (("subghz_keyfob", "unknown_keyfob_emission"),
                             ("subghz_garage", "unknown_garage_emission")):
+            if not S.get(f"rule_{rule}", True):
+                continue
             recent = conn.execute(
                 """SELECT entity_id, last_seen_unix
                    FROM entities
@@ -652,29 +709,29 @@ class Analytics:
 
         # ---- Rule 3: AirTag / Find-My broadcast ----
         # Continuous Find-My presence near the property is worth flagging.
-        airtag = conn.execute(
-            """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
-               FROM entities e
-               WHERE e.entity_id = 'ble:apple:Find-My'
-                 AND e.last_seen_unix > ?
-                 AND e.classification IS NULL""",
-            (now - 600,),
-        ).fetchone()
-        if airtag:
-            entity_id, last_seen, avg_rssi = airtag
-            # Heuristic severity: stronger signal = closer = more concerning.
-            close = avg_rssi is not None and avg_rssi > -65
-            severity = "high" if (home_state == "away" or close) else "medium"
-            _fire("airtag_findmy_present", severity, entity_id, 0.7 if close else 0.5, {
-                "avg_rssi": avg_rssi,
-                "home_state": home_state,
-                "explanation": "Apple Find-My (AirTag, lost AirPods, etc.) broadcast detected near property. "
-                               "If this is yours, mark it as known.",
-            })
+        if S["rule_airtag_findmy_present"]:
+            airtag = conn.execute(
+                """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
+                   FROM entities e
+                   WHERE e.entity_id = 'ble:apple:Find-My'
+                     AND e.last_seen_unix > ?
+                     AND e.classification IS NULL""",
+                (now - 600,),
+            ).fetchone()
+            if airtag:
+                entity_id, last_seen, avg_rssi = airtag
+                close = avg_rssi is not None and avg_rssi > -65
+                severity = "high" if (home_state == "away" or close) else "medium"
+                _fire("airtag_findmy_present", severity, entity_id, 0.7 if close else 0.5, {
+                    "avg_rssi": avg_rssi,
+                    "home_state": home_state,
+                    "explanation": "Apple Find-My (AirTag, lost AirPods, etc.) broadcast detected near property. "
+                                   "If this is yours, mark it as known.",
+                })
 
         # ---- Rule 4: first-time visitor at after-hours ----
         # Skip if no anchors are enrolled (we can't reason about who "should" be here).
-        if is_after_hours and any_anchor_enrolled:
+        if is_after_hours and any_anchor_enrolled and S["rule_first_time_visitor_after_hours"]:
             new_recent = conn.execute(
                 """SELECT entity_id, first_seen_unix, last_seen_unix, avg_rssi
                    FROM entities
@@ -698,18 +755,21 @@ class Analytics:
         # Limit to BLE entities (WiFi APs are stationary by nature; their RSSI being close
         # is expected). Also require recent visit churn (varying presence) so we don't fire
         # on stationary BLE IoT (TVs, smart bulbs).
-        very_close = conn.execute(
-            """SELECT e.entity_id, e.avg_rssi, e.visit_count, e.total_observations
-               FROM entities e
-               WHERE e.classification IS NULL
-                 AND e.avg_rssi IS NOT NULL AND e.avg_rssi > -50
-                 AND e.last_seen_unix > ?
-                 AND e.entity_id LIKE 'ble:%'
-                 AND e.visit_count > 1               -- has come and gone, not stationary
-                 AND e.total_observations < 5000     -- stationary BLE IoT have huge counts; skip those""",
-            (now - 300,),
-        ).fetchall()
-        for entity_id, avg_rssi, visit_count, total_obs in very_close:
+        if not S["rule_close_unknown_signal"]:
+            close_results = []
+        else:
+            close_results = conn.execute(
+                """SELECT e.entity_id, e.avg_rssi, e.visit_count, e.total_observations
+                   FROM entities e
+                   WHERE e.classification IS NULL
+                     AND e.avg_rssi IS NOT NULL AND e.avg_rssi > ?
+                     AND e.last_seen_unix > ?
+                     AND e.entity_id LIKE 'ble:%'
+                     AND e.visit_count > 1
+                     AND e.total_observations < 5000""",
+                (close_perim_rssi, now - 300),
+            ).fetchall()
+        for entity_id, avg_rssi, visit_count, total_obs in close_results:
             severity = "high" if home_state == "away" else "medium"
             _fire("close_unknown_signal", severity, entity_id, 0.6, {
                 "avg_rssi": avg_rssi,
@@ -720,6 +780,8 @@ class Analytics:
             })
 
         # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
+        if not S["rule_rogue_hotspot"]:
+            return
         rogue_wifi = conn.execute(
             """SELECT entity_id, avg_rssi, friendly_name
                FROM entities

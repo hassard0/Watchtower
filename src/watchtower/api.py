@@ -19,6 +19,7 @@ from typing import Any
 from aiohttp import web
 from ulid import ULID
 
+from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
 from watchtower.storage.db import get_connection
 
 log = logging.getLogger(__name__)
@@ -65,6 +66,12 @@ class ApiServer:
         self._app.router.add_get("/api/spectrum", self.spectrum)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
+        # Settings
+        self._app.router.add_get("/api/settings", self.settings_get)
+        self._app.router.add_post("/api/settings", self.settings_set)
+        # Admin / database tools
+        self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
+        self._app.router.add_post("/api/alerts/ack-all", self.alerts_ack_all)
         # Static dashboard
         self._app.router.add_get("/", self.index)
         self._app.router.add_get("/probe", self.probe_page)
@@ -641,6 +648,42 @@ class ApiServer:
             "midband_samples": samples,
             "subghz_decodes": subghz_decodes,
         })
+
+    # ---- ADMIN ----
+
+    async def admin_reset_entities(self, request: web.Request) -> web.Response:
+        with get_connection(self._db) as conn:
+            conn.execute("DELETE FROM entity_visits")
+            conn.execute("DELETE FROM entities")
+            conn.execute("DELETE FROM analytics_state WHERE key = 'rollup_last_event_id'")
+        return web.json_response({"ok": True})
+
+    async def alerts_ack_all(self, request: web.Request) -> web.Response:
+        with get_connection(self._db) as conn:
+            conn.execute("UPDATE alerts SET acknowledged = 1 WHERE acknowledged = 0")
+        return web.json_response({"ok": True})
+
+    # ---- SETTINGS ----
+
+    async def settings_get(self, request: web.Request) -> web.Response:
+        s = load_settings(self._db)
+        # also expose the schema (defaults + types) so the UI can render generically
+        meta = {}
+        for k, default in DEFAULT_SETTINGS.items():
+            meta[k] = {"default": default, "type": type(default).__name__}
+        return web.json_response({"settings": s, "schema": meta})
+
+    async def settings_set(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return web.json_response({"error": "object expected"}, status=400)
+        current = load_settings(self._db)
+        for k, v in body.items():
+            if k not in DEFAULT_SETTINGS:
+                return web.json_response({"error": f"unknown key: {k}"}, status=400)
+            current[k] = v
+        save_settings(self._db, current)
+        return web.json_response({"ok": True, "settings": current})
 
     # ---- DISCOVERY ----
 

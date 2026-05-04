@@ -64,6 +64,25 @@ tailwind.config = {
   @keyframes spin { to { transform: rotate(360deg); } }
   .heat-gradient { background: linear-gradient(90deg, #5dd0a8 0%, #f6c453 50%, #ff5470 100%); }
   .anomaly-ring { background: conic-gradient(from -90deg, var(--ring-color, #5dd0a8) 0deg, var(--ring-color) calc(var(--score, 0) * 360deg), #1f2740 calc(var(--score, 0) * 360deg)); }
+  /* Loading shimmer for skeleton placeholders */
+  .skeleton { position: relative; overflow: hidden; background: rgba(31, 39, 64, 0.45); border-radius: 6px; }
+  .skeleton::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(0, 217, 255, 0.08) 50%, transparent 100%);
+    animation: shimmer 1.4s infinite;
+    background-size: 200% 100%;
+  }
+  .loading-bar {
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, #00d9ff, transparent);
+    background-size: 50% 100%;
+    animation: loadingbar 1.2s linear infinite;
+  }
+  @keyframes loadingbar {
+    0% { background-position: -50% 0; }
+    100% { background-position: 150% 0; }
+  }
+  .stale-banner { background: linear-gradient(90deg, rgba(255, 181, 71, 0.1), rgba(255, 84, 112, 0.1)); border-color: rgba(255, 181, 71, 0.3); }
   .radar-sweep {
     position: absolute; inset: 0; border-radius: 9999px;
     background: conic-gradient(from 0deg, transparent 0deg, transparent 270deg,
@@ -83,6 +102,11 @@ tailwind.config = {
 <div class="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-signal-deep to-transparent opacity-50"></div>
 
 <div x-data="watchtower()" x-init="init()" class="min-h-screen pb-24 md:pb-8">
+
+  <!-- GLOBAL LOADING BAR -->
+  <div x-show="loading" class="fixed top-0 inset-x-0 z-40 h-0.5 overflow-hidden">
+    <div class="loading-bar"></div>
+  </div>
 
   <!-- TOP BAR -->
   <header class="sticky top-0 z-30 glass-strong border-b border-ink-600/40">
@@ -148,7 +172,7 @@ tailwind.config = {
     <!-- TAB STRIP -->
     <nav class="max-w-screen-2xl mx-auto px-4 pb-2 flex items-center gap-1 overflow-x-auto scrollbar">
       <template x-for="t in tabs" :key="t.id">
-        <button @click="tab = t.id"
+        <button @click="switchTab(t.id)"
                 class="seg-btn whitespace-nowrap px-3 py-1.5 rounded-md text-xs font-medium border border-transparent text-slate-400 hover:text-slate-200"
                 :data-active="tab === t.id">
           <span x-text="t.label"></span>
@@ -460,6 +484,21 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- skeleton when first loading Discover -->
+      <div x-show="tabLoading.discover && !tabsLoaded.discover" class="space-y-1.5">
+        <template x-for="i in 6" :key="i">
+          <div class="glass rounded-xl p-3 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full skeleton"></div>
+            <div class="flex-1 space-y-2">
+              <div class="h-3 w-1/3 skeleton"></div>
+              <div class="h-2 w-1/2 skeleton"></div>
+            </div>
+            <div class="w-16 h-6 skeleton"></div>
+            <div class="w-24 h-12 skeleton"></div>
+          </div>
+        </template>
+      </div>
+
       <div class="space-y-1.5">
         <template x-for="c in discoveryCandidates" :key="c.entity_id">
           <div class="glass rounded-xl p-3 flex items-center gap-3">
@@ -518,7 +557,43 @@ tailwind.config = {
             <div class="text-xs uppercase tracking-widest text-slate-500">Spectrum</div>
             <div class="text-base font-semibold">RF energy across watched bands</div>
           </div>
-          <div class="text-[10px] text-slate-500 num"><span x-text="spectrum.midband_samples?.length || 0"></span> samples · last 5 min</div>
+          <div class="text-[10px] text-slate-500 num">
+            <span x-text="spectrum.midband_samples?.length || 0"></span> samples · last <span x-text="formatWindow(spectrum.window_sec || 300)"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stale-data banner -->
+      <div x-show="spectrum.stale && (spectrum.midband_samples || []).length > 0"
+           class="stale-banner border rounded-xl p-3 flex items-start gap-3">
+        <svg class="w-5 h-5 mt-0.5 text-signal-warm flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        <div class="flex-1 text-xs">
+          <div class="font-semibold text-signal-warm">Spectrum data is stale</div>
+          <div class="text-slate-400">Most recent sample was <span x-text="spectrum.stale_age_sec ? formatAge(spectrum.stale_age_sec) : 'a while'"></span> ago. The mid-band scanner may have stalled — check <a href="#" @click.prevent="tab='settings'" class="underline">Settings</a> or <span class="font-mono">journalctl -u watchtower</span> on the Pi.</div>
+        </div>
+      </div>
+
+      <!-- Loading skeleton when first opening the tab -->
+      <div x-show="tabLoading.spectrum && !tabsLoaded.spectrum" class="glass rounded-2xl p-4 space-y-2">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Loading spectrum…</div>
+        <template x-for="i in 8" :key="i">
+          <div class="flex items-center gap-2">
+            <div class="w-20 h-3 skeleton"></div>
+            <div class="flex-1 h-5 skeleton"></div>
+            <div class="w-12 h-3 skeleton"></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Empty state -->
+      <div x-show="!tabLoading.spectrum && tabsLoaded.spectrum && (spectrum.midband_samples || []).length === 0"
+           class="glass rounded-2xl p-12 text-center">
+        <div class="text-5xl mb-3 opacity-40">📡</div>
+        <div class="text-sm font-semibold mb-1">No spectrum data</div>
+        <div class="text-[11px] text-slate-500 max-w-md mx-auto">
+          The mid-band scanner emits a sample every ~1 second when running. If
+          this stays empty, the RTL-SDR may be unplugged or the scanner crashed.
+          Check the Pi's <span class="font-mono">journalctl -u watchtower</span>.
         </div>
       </div>
 
@@ -690,6 +765,21 @@ tailwind.config = {
               </tr>
             </thead>
             <tbody>
+              <!-- Skeleton rows on first load -->
+              <template x-if="tabLoading.entities && !tabsLoaded.entities && entities.length === 0">
+                <tr>
+                  <td colspan="7" class="px-4 py-3">
+                    <div class="space-y-2">
+                      <template x-for="i in 6" :key="i">
+                        <div class="flex items-center gap-2">
+                          <div class="w-2 h-2 rounded-full skeleton"></div>
+                          <div class="flex-1 h-3 skeleton"></div>
+                        </div>
+                      </template>
+                    </div>
+                  </td>
+                </tr>
+              </template>
               <template x-for="e in entities" :key="e.entity_id">
                 <tr @click="openEntity(e.entity_id)" class="border-b border-ink-600/20 hover:bg-ink-700/40 cursor-pointer transition">
                   <td class="px-4 py-2.5">
@@ -768,6 +858,17 @@ tailwind.config = {
           <span x-text="formatTime(timelineTo)"></span>
         </div>
         <div class="space-y-1 max-h-[60vh] overflow-y-auto scrollbar">
+          <!-- skeleton on first load -->
+          <template x-if="tabLoading.timeline && !tabsLoaded.timeline">
+            <div class="space-y-1.5">
+              <template x-for="i in 8" :key="i">
+                <div class="flex items-center gap-2">
+                  <div class="w-32 sm:w-44 h-3 skeleton"></div>
+                  <div class="flex-1 h-5 skeleton"></div>
+                </div>
+              </template>
+            </div>
+          </template>
           <template x-for="row in timelineRows" :key="row.entity_id">
             <div class="flex items-center gap-2 group">
               <div class="w-32 sm:w-44 flex-shrink-0 truncate text-xs flex items-center gap-1.5">
@@ -783,7 +884,7 @@ tailwind.config = {
               </div>
             </div>
           </template>
-          <div x-show="timelineRows.length === 0" class="text-xs text-slate-500 text-center py-12">no visits in this window</div>
+          <div x-show="!tabLoading.timeline && tabsLoaded.timeline && timelineRows.length === 0" class="text-xs text-slate-500 text-center py-12">no visits in this window — try a longer one above</div>
         </div>
       </div>
     </section>
@@ -1222,7 +1323,7 @@ tailwind.config = {
   <nav class="md:hidden fixed bottom-0 inset-x-0 z-40 glass-strong border-t border-ink-600/40 px-2 pt-1 pb-[calc(env(safe-area-inset-bottom,0px)+0.25rem)]">
     <div class="grid grid-cols-4 gap-1">
       <template x-for="t in tabs" :key="t.id">
-        <button @click="tab = t.id"
+        <button @click="switchTab(t.id)"
                 class="flex flex-col items-center justify-center py-2 rounded-lg text-[10px] uppercase tracking-wider transition"
                 :class="tab === t.id ? 'text-signal-glow bg-signal-deep/15' : 'text-slate-500 hover:text-slate-300'">
           <span x-html="t.icon" class="mb-0.5"></span>

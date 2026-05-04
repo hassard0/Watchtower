@@ -8,8 +8,13 @@ function watchtower() {
     discoveryCandidates: [],
     discoveryProbing: {},
     discoveryProbed: {},
-    spectrum: { midband_samples: [], subghz_decodes: [] },
+    spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
     zones: [],
+    // Per-tab loading state. true while fetching.
+    tabLoading: {},
+    // Tabs that have completed at least one load — used to decide skeleton
+    // (cold start) vs. shimmer-bar (refresh).
+    tabsLoaded: {},
     settings: {},
     settingsSchema: {},
     settingsDirty: false,
@@ -83,18 +88,29 @@ function watchtower() {
 
     async refresh() {
       this.loading = true;
+      const tab = this.tab;
+      this.tabLoading = { ...this.tabLoading, [tab]: true };
       try {
         const tasks = [this.loadState(), this.loadEntities(), this.loadAlerts()];
-        if (this.tab === 'timeline')  tasks.push(this.loadTimeline());
-        if (this.tab === 'spectrum')  tasks.push(this.loadSpectrum());
-        if (this.tab === 'zones')     tasks.push(this.loadZones());
-        if (this.tab === 'discover')  tasks.push(this.loadDiscovery());
-        if (this.tab === 'overview')  tasks.push(this.loadRecap());
-        if (this.tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
+        if (tab === 'timeline')  tasks.push(this.loadTimeline());
+        if (tab === 'spectrum')  tasks.push(this.loadSpectrum());
+        if (tab === 'zones')     tasks.push(this.loadZones());
+        if (tab === 'discover')  tasks.push(this.loadDiscovery());
+        if (tab === 'overview')  tasks.push(this.loadRecap());
+        if (tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
         await Promise.all(tasks);
+        this.tabsLoaded = { ...this.tabsLoaded, [tab]: true };
       } finally {
         this.loading = false;
+        this.tabLoading = { ...this.tabLoading, [tab]: false };
       }
+    },
+
+    // Called when user clicks a different tab — kick off its fetch immediately
+    // so we don't wait for the next 5-second auto-refresh.
+    switchTab(t) {
+      this.tab = t;
+      this.refresh();
     },
 
     async loadState() {
@@ -109,6 +125,7 @@ function watchtower() {
         const r = await fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`);
         const j = await r.json();
         this.entities = j.entities || [];
+        this.tabsLoaded = { ...this.tabsLoaded, entities: true };
       } catch (e) { console.warn('loadEntities', e); }
     },
 
@@ -200,6 +217,7 @@ function watchtower() {
         const r = await fetch(`/api/timeline?from=${from}&to=${to}`);
         const j = await r.json();
         this.visits = j.visits || [];
+        this.tabsLoaded = { ...this.tabsLoaded, timeline: true };
       } catch (e) { console.warn('loadTimeline', e); }
     },
 
@@ -207,6 +225,8 @@ function watchtower() {
       try {
         const r = await fetch('/api/spectrum');
         this.spectrum = await r.json();
+        this._baselineCache = null;
+        this.tabsLoaded = { ...this.tabsLoaded, spectrum: true };
       } catch (e) { console.warn('loadSpectrum', e); }
     },
 
@@ -215,6 +235,7 @@ function watchtower() {
         const r = await fetch('/api/zones');
         const j = await r.json();
         this.zones = j.zones || [];
+        this.tabsLoaded = { ...this.tabsLoaded, zones: true };
       } catch (e) { console.warn('loadZones', e); }
     },
 
@@ -223,6 +244,7 @@ function watchtower() {
         const r = await fetch('/api/discovery');
         const j = await r.json();
         this.discoveryCandidates = j.candidates || [];
+        this.tabsLoaded = { ...this.tabsLoaded, discover: true };
       } catch (e) { console.warn('loadDiscovery', e); }
     },
 
@@ -230,6 +252,7 @@ function watchtower() {
       try {
         const r = await fetch('/api/recap?hours=' + this.recapHours);
         this.recap = await r.json();
+        this.tabsLoaded = { ...this.tabsLoaded, overview: true };
       } catch (e) { console.warn('loadRecap', e); }
     },
 
@@ -724,6 +747,18 @@ function watchtower() {
       if (dt < 3600) return `${Math.floor(dt/60)}m ago`;
       if (dt < 86400) return `${Math.floor(dt/3600)}h ago`;
       return `${Math.floor(dt/86400)}d ago`;
+    },
+    formatWindow(secs) {
+      if (secs >= 86400) return `${Math.round(secs/86400)}d`;
+      if (secs >= 3600) return `${Math.round(secs/3600)}h`;
+      if (secs >= 60) return `${Math.round(secs/60)} min`;
+      return `${secs}s`;
+    },
+    formatAge(secs) {
+      if (secs >= 86400) return `${Math.round(secs/86400)} day${secs>=2*86400?'s':''}`;
+      if (secs >= 3600) return `${Math.round(secs/3600)} hour${secs>=2*3600?'s':''}`;
+      if (secs >= 60) return `${Math.round(secs/60)} min`;
+      return `${secs}s`;
     },
     formatTime(ts) {
       const d = new Date(ts * 1000);

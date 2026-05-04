@@ -731,23 +731,35 @@ class ApiServer:
     # ---- SPECTRUM ----
 
     async def spectrum(self, request: web.Request) -> web.Response:
-        """Return the latest energy reading per midband and sub-GHz band, last 5 minutes."""
+        """Return the latest energy reading per midband and sub-GHz band.
+
+        Window is adaptive: starts at last 5 min; if empty (e.g. midband
+        scanner is down), expands to 1 hour and includes a `stale` flag so
+        the UI can warn the user.
+        """
         now = int(time.time())
         with get_connection(self._db) as conn:
-            cursor = conn.execute("""
-                SELECT json_extract(features_json, '$.band_name') AS band,
-                       json_extract(features_json, '$.frequency_hz') AS freq,
-                       json_extract(features_json, '$.energy_dbm') AS energy,
-                       ts_unix
-                FROM raw_events
-                WHERE scanner = 'midband_scanner' AND ts_unix > ?
-                ORDER BY ts_unix DESC
-                LIMIT 2000
-            """, (now - 300,))
-            samples = [
-                {"band": b, "freq_hz": f, "energy_dbm": e, "ts_unix": t}
-                for b, f, e, t in cursor.fetchall() if b and e is not None
-            ]
+            samples = []
+            window_sec = 300
+            for win in (300, 3600, 86400):  # 5 min → 1 h → 24 h
+                cursor = conn.execute("""
+                    SELECT json_extract(features_json, '$.band_name') AS band,
+                           json_extract(features_json, '$.frequency_hz') AS freq,
+                           json_extract(features_json, '$.energy_dbm') AS energy,
+                           ts_unix
+                    FROM raw_events
+                    WHERE scanner = 'midband_scanner' AND ts_unix > ?
+                    ORDER BY ts_unix DESC
+                    LIMIT 2000
+                """, (now - win,))
+                samples = [
+                    {"band": b, "freq_hz": f, "energy_dbm": e, "ts_unix": t}
+                    for b, f, e, t in cursor.fetchall() if b and e is not None
+                ]
+                window_sec = win
+                if samples:
+                    break
+
             sub_cursor = conn.execute("""
                 SELECT ts_unix, json_extract(features_json, '$.protocol') AS proto,
                        json_extract(features_json, '$.frequency_hz') AS freq
@@ -760,10 +772,15 @@ class ApiServer:
                 {"ts_unix": t, "protocol": p, "freq_hz": f}
                 for t, p, f in sub_cursor.fetchall()
             ]
+        most_recent = max((s["ts_unix"] for s in samples), default=0)
+        stale = (now - most_recent) > 120 if most_recent else True
         return web.json_response({
             "ts_unix": now,
             "midband_samples": samples,
             "subghz_decodes": subghz_decodes,
+            "window_sec": window_sec,
+            "stale": stale,
+            "stale_age_sec": (now - most_recent) if most_recent else None,
         })
 
     # ---- CSV EXPORTS ----

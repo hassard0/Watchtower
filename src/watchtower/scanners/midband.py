@@ -51,6 +51,8 @@ _BAND_LABELS: list[tuple[int, int, str, EventKind]] = [
 
 
 # Default wide-band sweep: 22 representative center frequencies.
+# Skips 1100-1250 MHz where the E4000 tuner has a PLL gap. Scanner also
+# auto-skips bad frequencies at runtime (5 min cooldown).
 DEFAULT_SWEEP_FREQS_HZ: list[int] = [
     25_000_000,
     98_000_000,
@@ -69,7 +71,7 @@ DEFAULT_SWEEP_FREQS_HZ: list[int] = [
     915_000_000,
     944_000_000,
     1_090_000_000,
-    1_227_000_000,
+    # 1_227_000_000,  # GPS L2 — E4000 PLL doesn't lock here.
     1_350_000_000,
     1_575_420_000,
     1_602_000_000,
@@ -114,43 +116,76 @@ class MidbandScanner(Scanner):
         self._n = sample_count
 
     async def run(self) -> None:
-        try:
-            sdr = RtlSdr(device_index=self._device_index)
-        except Exception as ex:  # noqa: BLE001
-            log.exception("midband: failed to open RTL-SDR device %d", self._device_index)
-            raise
-        try:
-            sdr.sample_rate = self._sample_rate
-            sdr.gain = "auto"
-            while not self._stop_event.is_set():
-                for freq in self._freqs:
-                    if self._stop_event.is_set():
-                        break
-                    sdr.center_freq = freq
-                    # Reading samples is a blocking call — run in default executor.
-                    iq = await asyncio.get_event_loop().run_in_executor(
-                        None, sdr.read_samples, self._n
-                    )
-                    iq = np.asarray(iq, dtype=np.complex64)
-                    e_dbm = _energy_dbm(iq)
-                    label, kind = _label_for_freq(freq)
-                    ev = Event(
-                        scanner=ScannerName.MIDBAND,
-                        kind=kind,
-                        features=Features(
-                            band_name=label,
-                            frequency_hz=freq,
-                            energy_dbm=e_dbm,
-                        ),
-                        raw={"sample_rate_hz": self._sample_rate, "n": self._n},
-                    )
-                    await self._emit(ev)
-                    try:
-                        await asyncio.wait_for(self._stop_event.wait(), timeout=self._dwell)
-                    except asyncio.TimeoutError:
-                        pass
-        finally:
+        # Outer reconnect loop: if the SDR throws a USB error or the tuner
+        # gets wedged, close and re-open instead of dying.
+        skip_until: dict[int, float] = {}  # freq -> ts after which we'll retry
+        while not self._stop_event.is_set():
             try:
-                sdr.close()
+                sdr = RtlSdr(device_index=self._device_index)
             except Exception:  # noqa: BLE001
-                log.exception("midband: sdr.close failed")
+                log.exception("midband: failed to open RTL-SDR device %d — retrying in 30s", self._device_index)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            try:
+                sdr.sample_rate = self._sample_rate
+                sdr.gain = "auto"
+                while not self._stop_event.is_set():
+                    now = asyncio.get_event_loop().time()
+                    for freq in self._freqs:
+                        if self._stop_event.is_set():
+                            break
+                        # Honor per-freq cool-down for known-bad frequencies (E4000 PLL gaps, etc.)
+                        if freq in skip_until and skip_until[freq] > now:
+                            continue
+                        try:
+                            sdr.center_freq = freq
+                            iq = await asyncio.get_event_loop().run_in_executor(
+                                None, sdr.read_samples, self._n
+                            )
+                            iq = np.asarray(iq, dtype=np.complex64)
+                            e_dbm = _energy_dbm(iq)
+                        except Exception as ex:  # noqa: BLE001
+                            # Likely PLL-not-locked or USB I/O glitch — skip this freq for 5 min.
+                            log.warning("midband: freq %d failed (%s); skipping for 5 min", freq, str(ex)[:80])
+                            skip_until[freq] = now + 300
+                            # If the SDR raised a USB error, the device may need a full reset.
+                            msg = str(ex).lower()
+                            if "rtlsdr" in msg or "libusb" in msg or "no device" in msg:
+                                raise  # break out to outer loop, reopen device
+                            continue
+                        label, kind = _label_for_freq(freq)
+                        ev = Event(
+                            scanner=ScannerName.MIDBAND,
+                            kind=kind,
+                            features=Features(
+                                band_name=label,
+                                frequency_hz=freq,
+                                energy_dbm=e_dbm,
+                            ),
+                            raw={"sample_rate_hz": self._sample_rate, "n": self._n},
+                        )
+                        await self._emit(ev)
+                        try:
+                            await asyncio.wait_for(self._stop_event.wait(), timeout=self._dwell)
+                        except asyncio.TimeoutError:
+                            pass
+            except Exception:  # noqa: BLE001
+                log.exception("midband: scanner loop crashed — reopening device in 5s")
+                try:
+                    sdr.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            else:
+                try:
+                    sdr.close()
+                except Exception:  # noqa: BLE001
+                    log.debug("midband: sdr.close raised, ignoring")

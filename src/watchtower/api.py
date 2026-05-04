@@ -439,13 +439,59 @@ class ApiServer:
     async def probe_entity(self, request: web.Request) -> web.Response:
         """Synchronously fire a GATT probe at the entity's MAC and return the result.
 
-        Bypasses the scheduler — useful from the entity-detail UI button.
+        Handles three entity_id shapes:
+        - ble:mac:<mac>     -> probe directly
+        - ble:named:<name>  -> look up the most recently seen MAC matching that local_name
+        - ble:apple:<kind>  -> look up the strongest-RSSI recent MAC with matching apple subtype
         """
         eid = request.match_info["eid"]
-        if not eid.startswith("ble:mac:"):
-            return web.json_response({"error": "only BLE entities with stable MACs can be GATT-probed"}, status=400)
-        mac = eid[len("ble:mac:"):]
+        mac: str | None = None
+        chosen_via = ""
+        if eid.startswith("ble:mac:"):
+            mac = eid[len("ble:mac:"):]
+            chosen_via = "stable MAC"
+        elif eid.startswith("ble:named:"):
+            name = eid[len("ble:named:"):]
+            with get_connection(self._db) as conn:
+                row = conn.execute(
+                    """SELECT json_extract(features_json,'$.mac'), MAX(ts_unix)
+                       FROM raw_events
+                       WHERE scanner='ble_scanner' AND ts_unix > strftime('%s','now') - 600
+                         AND json_extract(features_json,'$.local_name') = ?
+                       GROUP BY json_extract(features_json,'$.mac')
+                       ORDER BY MAX(ts_unix) DESC LIMIT 1""",
+                    (name,),
+                ).fetchone()
+            if row and row[0]:
+                mac = row[0].lower()
+                chosen_via = f"current MAC for local_name={name!r}"
+        elif eid.startswith("ble:apple:") or eid.startswith("ble:random:"):
+            return web.json_response({
+                "ok": True,
+                "result": {
+                    "ok": False,
+                    "error": (
+                        "this entity is grouped by Apple Continuity subtype / fingerprint, "
+                        "not a single MAC. probing requires a specific device — open the "
+                        "Entities tab and pick a stable-MAC entity, or wait for the device "
+                        "to surface as ble:mac:* once we see its non-random MAC."
+                    ),
+                },
+            })
+        else:
+            return web.json_response({
+                "ok": True,
+                "result": {"ok": False, "error": f"non-BLE entity ({eid}) — GATT probe N/A"},
+            })
+
+        if not mac:
+            return web.json_response({
+                "ok": True,
+                "result": {"ok": False, "error": "no recent MAC found for this entity (last 10 min)"},
+            })
         result = await probe_one(mac, pause_scanner=self._pause_scanner_factory)
+        result["probed_mac"] = mac
+        result["chosen_via"] = chosen_via
         with get_connection(self._db) as conn:
             _apply_probe_result(conn, eid, result)
         return web.json_response({"ok": True, "result": result})

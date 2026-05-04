@@ -475,9 +475,24 @@ tailwind.config = {
                 <span class="font-medium" x-text="entityDisplayName(c)"></span>
                 <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(c.kind)" x-text="c.kind?.replace(/_/g,' ')"></span>
                 <span x-show="c.on_home_wifi" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/20 text-signal-glow border border-signal-glow/40">on home wi-fi</span>
+                <span x-show="discoveryProbed[c.entity_id]?.ok" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-pulse/20 text-signal-pulse border border-signal-pulse/40">✓ named</span>
               </div>
               <div class="text-[10px] text-slate-500 num truncate" x-text="`${c.total_observations.toLocaleString()} obs · ${c.visit_count} visits · ${Math.round((c.regularity || 0) * 100)}% regular · ${relTime(c.last_seen_unix)}`"></div>
+              <div x-show="discoveryProbed[c.entity_id]" class="text-[10px] mt-1">
+                <span x-show="discoveryProbed[c.entity_id]?.ok" class="text-signal-pulse">
+                  → <span x-text="discoveryProbed[c.entity_id]?.name || discoveryProbed[c.entity_id]?.model"></span>
+                  <span x-show="discoveryProbed[c.entity_id]?.mfr" class="text-slate-500" x-text="' (' + discoveryProbed[c.entity_id]?.mfr + ')'"></span>
+                </span>
+                <span x-show="!discoveryProbed[c.entity_id]?.ok" class="text-slate-500 italic">→ no GATT response</span>
+              </div>
             </div>
+            <button @click="quickProbe(c)" :disabled="!!discoveryProbing[c.entity_id]"
+                    title="Quick GATT probe for friendly name"
+                    class="hidden md:flex items-center gap-1 px-2 py-1.5 rounded border border-signal-glow/30 text-signal-glow text-[10px] uppercase tracking-wider hover:bg-signal-glow/10 disabled:opacity-50">
+              <svg x-show="!discoveryProbing[c.entity_id]" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              <svg x-show="!!discoveryProbing[c.entity_id]" class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/></svg>
+              <span x-text="discoveryProbing[c.entity_id] ? '...' : 'probe'"></span>
+            </button>
             <div class="hidden sm:flex flex-col gap-1">
               <button @click="quickClassify(c, 'anchor')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-anchor/40 text-anchor hover:bg-anchor/10">anchor</button>
               <button @click="quickClassify(c, 'satellite')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-satellite/40 text-satellite hover:bg-satellite/10">satellite</button>
@@ -988,19 +1003,29 @@ tailwind.config = {
           </div>
 
           <!-- GATT probe -->
-          <div class="mb-4" x-show="entityDetail.entity?.entity_id?.startsWith('ble:mac:')">
+          <div class="mb-4" x-show="entityDetail.entity?.entity_id?.startsWith('ble:')">
             <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Active probe</div>
             <button @click="probeEntity()" :disabled="probing"
-                    class="px-3 py-1.5 rounded-md text-xs border border-signal-glow/40 text-signal-glow hover:bg-signal-glow/10 disabled:opacity-50 disabled:cursor-not-allowed">
-              <span x-show="!probing">⚡ Probe device for friendly name</span>
-              <span x-show="probing">probing… (up to 6s)</span>
+                    class="w-full px-4 py-3 rounded-xl bg-gradient-to-r from-signal-deep/30 to-signal-glow/30 border border-signal-glow/40 text-signal-glow font-semibold text-sm hover:from-signal-deep/50 hover:to-signal-glow/50 hover:border-signal-glow/80 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2">
+              <svg x-show="!probing" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              <svg x-show="probing" class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/></svg>
+              <span x-show="!probing">Probe device for real name</span>
+              <span x-show="probing">probing live BLE… up to 6s</span>
             </button>
-            <div x-show="probeResult" class="mt-2 text-xs">
-              <div x-show="probeResult?.ok" class="text-signal-pulse">
-                ✓ <span x-text="probeResult?.name || probeResult?.model || probeResult?.mfr"></span>
-                <span x-show="probeResult?.mfr" class="text-slate-500" x-text="' · ' + probeResult?.mfr"></span>
+            <div x-show="probeResult" class="mt-2 text-xs animate-fade-in">
+              <div x-show="probeResult?.ok" class="px-3 py-2 rounded-md bg-signal-pulse/10 border border-signal-pulse/40 text-signal-pulse">
+                <div class="font-semibold">✓ <span x-text="probeResult?.name || probeResult?.model || probeResult?.mfr || 'response received'"></span></div>
+                <div class="text-[10px] text-slate-400 mt-0.5">
+                  <span x-show="probeResult?.mfr" x-text="'manufacturer: ' + probeResult?.mfr"></span>
+                  <span x-show="probeResult?.model" x-text="' · model: ' + probeResult?.model"></span>
+                  <span x-show="probeResult?.fw" x-text="' · fw: ' + probeResult?.fw"></span>
+                  <span x-show="probeResult?.probed_mac" class="font-mono" x-text="' · ' + probeResult?.probed_mac"></span>
+                </div>
               </div>
-              <div x-show="probeResult && !probeResult?.ok" class="text-slate-500 italic" x-text="'× ' + (probeResult?.error || 'no response — device probably refuses unauthenticated connections')"></div>
+              <div x-show="probeResult && !probeResult?.ok" class="px-3 py-2 rounded-md bg-ink-700/50 border border-ink-600/40 text-slate-400">
+                <div class="text-[11px]">× <span x-text="probeResult?.error || 'no response'"></span></div>
+                <div class="text-[10px] text-slate-600 mt-0.5">Common reasons: device requires pairing, is iOS/AirTag/lock (security), is asleep/out of range, or rejected the connection.</div>
+              </div>
             </div>
           </div>
 

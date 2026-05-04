@@ -6,6 +6,8 @@ function watchtower() {
     alerts: [],
     visits: [],
     discoveryCandidates: [],
+    discoveryProbing: {},
+    discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [] },
     zones: [],
     settings: {},
@@ -318,6 +320,24 @@ function watchtower() {
       } catch (e) { alert('failed: ' + e.message); }
     },
 
+    async quickProbe(c) {
+      if (this.discoveryProbing[c.entity_id]) return;
+      this.discoveryProbing = { ...this.discoveryProbing, [c.entity_id]: true };
+      try {
+        const r = await fetch(`/api/entities/${encodeURIComponent(c.entity_id)}/probe`, { method: 'POST' });
+        const j = await r.json();
+        this.discoveryProbed = { ...this.discoveryProbed, [c.entity_id]: j.result };
+        if (j.result?.ok) {
+          await this.loadDiscovery();
+          await this.loadEntities();
+        }
+      } catch (e) {
+        this.discoveryProbed = { ...this.discoveryProbed, [c.entity_id]: { ok: false, error: e.message } };
+      } finally {
+        this.discoveryProbing = { ...this.discoveryProbing, [c.entity_id]: false };
+      }
+    },
+
     async quickClassify(c, classification) {
       try {
         await fetch(`/api/entities/${encodeURIComponent(c.entity_id)}/classify`, {
@@ -333,9 +353,10 @@ function watchtower() {
 
     async openEntity(eid) {
       try {
+        const sameEntity = this.entityDetail?.entity?.entity_id === eid;
         const r = await fetch(`/api/entities/${encodeURIComponent(eid)}`);
         this.entityDetail = await r.json();
-        this.probeResult = null;
+        if (!sameEntity) this.probeResult = null;
       } catch (e) { console.warn('openEntity', e); }
     },
 
@@ -345,16 +366,23 @@ function watchtower() {
       if (!this.entityDetail || this.probing) return;
       this.probing = true;
       this.probeResult = null;
+      const eid = this.entityDetail.entity.entity_id;
       try {
-        const eid = this.entityDetail.entity.entity_id;
         const r = await fetch(`/api/entities/${encodeURIComponent(eid)}/probe`, { method: 'POST' });
         const j = await r.json();
-        this.probeResult = j.result;
-        if (j.result?.ok) {
-          // Reload entity to pick up new friendly_name.
-          await this.openEntity(eid);
-          await this.loadEntities();
+        const result = j.result || { ok: false, error: 'no response' };
+        // If probe succeeded, refetch the entity and the entities list so the
+        // new friendly_name is reflected — but DON'T clear probeResult, so the
+        // user sees what we found.
+        if (result.ok) {
+          try {
+            const r2 = await fetch(`/api/entities/${encodeURIComponent(eid)}`);
+            const detail = await r2.json();
+            this.entityDetail = detail;
+          } catch (e) { /* keep showing result regardless */ }
+          this.loadEntities();  // fire-and-forget
         }
+        this.probeResult = result;
       } catch (e) {
         this.probeResult = { ok: false, error: e.message };
       } finally {

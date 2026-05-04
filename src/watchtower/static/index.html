@@ -64,6 +64,16 @@ tailwind.config = {
   @keyframes spin { to { transform: rotate(360deg); } }
   .heat-gradient { background: linear-gradient(90deg, #5dd0a8 0%, #f6c453 50%, #ff5470 100%); }
   .anomaly-ring { background: conic-gradient(from -90deg, var(--ring-color, #5dd0a8) 0deg, var(--ring-color) calc(var(--score, 0) * 360deg), #1f2740 calc(var(--score, 0) * 360deg)); }
+  .radar-sweep {
+    position: absolute; inset: 0; border-radius: 9999px;
+    background: conic-gradient(from 0deg, transparent 0deg, transparent 270deg,
+      rgba(0, 217, 255, 0.0) 280deg, rgba(0, 217, 255, 0.20) 320deg,
+      rgba(0, 217, 255, 0.45) 360deg);
+    animation: radarSweep 6s linear infinite;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+  @keyframes radarSweep { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   .seg-btn { transition: all 0.15s; }
   .seg-btn[data-active="true"] { background: rgba(124, 58, 237, 0.25); border-color: rgba(124, 58, 237, 0.5); color: #fff; }
 </style>
@@ -240,6 +250,8 @@ tailwind.config = {
             <div class="text-[10px] text-slate-600">RSSI = distance, color = trust</div>
           </div>
           <div class="relative aspect-square max-w-[420px] mx-auto">
+            <!-- Sweep beam -->
+            <div class="radar-sweep"></div>
             <!-- Range rings -->
             <template x-for="r in [0.25, 0.5, 0.75, 1.0]" :key="r">
               <div class="absolute inset-0 m-auto rounded-full border border-ink-600/60"
@@ -984,6 +996,34 @@ tailwind.config = {
         </div>
       </template>
     </div>
+  </div>
+
+  <!-- TOAST FOR NEW ALERTS -->
+  <div class="fixed bottom-24 md:bottom-4 right-4 z-[60] space-y-2 max-w-sm w-full pointer-events-none">
+    <template x-for="t in toasts" :key="t.id">
+      <div x-transition:enter="transition transform duration-200 ease-out"
+           x-transition:enter-start="translate-y-4 opacity-0"
+           x-transition:enter-end="translate-y-0 opacity-100"
+           x-transition:leave="transition transform duration-200 ease-in"
+           x-transition:leave-start="opacity-100"
+           x-transition:leave-end="opacity-0 translate-y-2"
+           class="glass-strong rounded-xl p-3 border-l-4 pointer-events-auto shadow-2xl shadow-black/40"
+           :class="severityBorderClass(t.severity)">
+        <div class="flex items-start gap-2.5">
+          <div class="w-7 h-7 flex-shrink-0 rounded-lg flex items-center justify-center" :class="severityChipBg(t.severity)">
+            <svg class="w-4 h-4" :class="severityChipText(t.severity)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="severityChipFull(t.severity)" x-text="t.severity"></span>
+              <span class="text-xs font-semibold truncate" x-text="t.rule_id?.replace(/_/g,' ')"></span>
+            </div>
+            <div class="text-[11px] text-slate-400 truncate mt-0.5" x-text="t.friendly_name || t.entity_id || ''"></div>
+          </div>
+          <button @click="dismissToast(t.id)" class="text-slate-500 hover:text-slate-200">×</button>
+        </div>
+      </div>
+    </template>
   </div>
 
   <!-- BOTTOM TAB BAR (mobile) -->

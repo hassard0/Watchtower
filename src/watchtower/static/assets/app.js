@@ -13,6 +13,9 @@ function watchtower() {
     settingsDirty: false,
     recap: null,
     recapHours: 8,
+    toasts: [],
+    _seenAlertIds: new Set(),
+    _firstLoad: true,
     entityDetail: null,
     loading: false,
     now: '',
@@ -110,8 +113,34 @@ function watchtower() {
       try {
         const r = await fetch('/api/alerts');
         const j = await r.json();
-        this.alerts = j.alerts || [];
+        const newAlerts = j.alerts || [];
+        // Toast for any high/critical alert we've never shown before.
+        if (!this._firstLoad) {
+          for (const a of newAlerts) {
+            if (this._seenAlertIds.has(a.alert_id)) continue;
+            this._seenAlertIds.add(a.alert_id);
+            if (a.severity === 'high' || a.severity === 'critical') {
+              this.pushToast(a);
+            }
+          }
+        } else {
+          // First load: just record IDs without toasting.
+          for (const a of newAlerts) this._seenAlertIds.add(a.alert_id);
+          this._firstLoad = false;
+        }
+        this.alerts = newAlerts;
       } catch (e) { console.warn('loadAlerts', e); }
+    },
+
+    pushToast(alert) {
+      const id = (Math.random() * 1e9).toString(36);
+      const t = { ...alert, id };
+      this.toasts.push(t);
+      setTimeout(() => this.dismissToast(id), 8000);
+    },
+
+    dismissToast(id) {
+      this.toasts = this.toasts.filter(t => t.id !== id);
     },
 
     async loadTimeline() {

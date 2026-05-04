@@ -25,7 +25,7 @@ def test_init_db_is_idempotent(tmp_path: Path):
     init_db(db)  # second call must not fail
     with get_connection(db) as conn:
         v = conn.execute("SELECT version FROM schema_meta").fetchone()
-    assert v[0] == 2  # schema v2 adds entities/visits/baseline/alerts
+    assert v[0] == 3  # schema v3 adds zones/zone_samples/probe_captures
 
 
 def test_raw_events_columns(tmp_path: Path):
@@ -48,4 +48,4 @@ def test_get_connection_enables_foreign_keys(tmp_path: Path):
 def test_schema_version_returns_int(tmp_path: Path):
     db = tmp_path / "test.db"
     init_db(db)
-    assert schema_version(db) == 2
+    assert schema_version(db) == 3

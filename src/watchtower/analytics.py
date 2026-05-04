@@ -42,13 +42,80 @@ def _hour_of_week(ts_unix: int) -> int:
     return dt.weekday() * 24 + dt.hour
 
 
+def _apple_continuity_kind(mfr_hex: str) -> str | None:
+    """Decode Apple Continuity manufacturer data type byte. Returns a stable subtype label or None.
+
+    Apple Continuity encoding: bytes 0..1 = vendor_id LE = 0x4C00 (Apple),
+    byte 2 = subtype, byte 3 = subtype length.
+    """
+    if not mfr_hex or len(mfr_hex) < 6:
+        return None
+    if not mfr_hex.lower().startswith("4c00"):
+        return None
+    try:
+        subtype = mfr_hex[4:6]
+    except IndexError:
+        return None
+    return {
+        "01": "iCloud",
+        "02": "iBeacon",
+        "03": "AirPrint",
+        "05": "AirDrop",
+        "06": "HomeKit",
+        "07": "AirPods/Proximity",
+        "08": "Hey-Siri",
+        "09": "AirPlay",
+        "0a": "Magic-Switch",
+        "0b": "Watch-Connection",
+        "0c": "Handoff",
+        "0d": "Tethering-Target",
+        "0e": "Tethering-Source",
+        "0f": "Nearby-Action",
+        "10": "Nearby-Info",
+        "12": "Find-My",
+        "16": "AirPods-Connected",
+    }.get(subtype.lower())
+
+
+def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
+    """Decide what *kind of identity* a BLE event represents.
+
+    Strategy: collapse random-MAC noise into vendor/service-keyed groups so the
+    dashboard surfaces meaningful devices instead of one row per 15-minute MAC rotation.
+
+    - Universal (non-random) MAC → stable per-device identity ("ble:mac:aa:bb:..").
+    - BLE local name present → identity by local name ("ble:named:Bose QC45").
+    - Apple Continuity manufacturer data with known subtype → grouped per subtype
+      ("ble:apple:Find-My"), since those rotate keys but the subtype is stable.
+    - Random MAC, no name, no useful Continuity subtype → return None
+      (counts toward baseline noise but does not create an entity row).
+    """
+    mac = features.get("mac")
+    if not mac:
+        return None
+    if features.get("is_random_mac") is False:
+        return f"ble:mac:{mac.lower()}"
+    name = (features.get("local_name") or "").strip()
+    if name:
+        # Named devices keep their identity even when MAC rotates. Devices
+        # with very generic names (e.g., a single space, "BLE", "iPhone")
+        # would still group together — acceptable for v1.
+        if 2 <= len(name) <= 64:
+            return f"ble:named:{name}"
+    mfr_hex = features.get("manufacturer_data_hex") or ""
+    apple_kind = _apple_continuity_kind(mfr_hex)
+    if apple_kind:
+        # Group by Apple Continuity subtype. Multiple iPhones broadcasting
+        # Nearby-Info will share an entity — we report population, not per-device.
+        return f"ble:apple:{apple_kind}"
+    # Otherwise: random MAC with no useful identifier → background noise.
+    return None
+
+
 def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
     """Map an event to an entity_id. Returns None if event is not entity-bearing."""
     if scanner == "ble_scanner":
-        mac = ev_features.get("mac")
-        if not mac:
-            return None
-        return f"ble:{mac.lower()}"
+        return _ble_entity_id(ev_features, scanner, kind)
     if scanner == "subghz_scanner":
         proto = ev_features.get("protocol")
         decoded = ev_features.get("decoded") or {}
@@ -60,7 +127,13 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
         mac = ev_features.get("mac")
         if not mac:
             return None
-        return f"wifi:{mac.lower()}"
+        # WiFi probe requests use random MACs heavily — same logic as BLE.
+        if ev_features.get("is_random_mac") is False:
+            return f"wifi:mac:{mac.lower()}"
+        ssid = (ev_features.get("ssid") or "").strip()
+        if ssid:
+            return f"wifi:ssid:{ssid}"
+        return None
     # midband -> baseline-only, no entity
     return None
 
@@ -156,6 +229,7 @@ class Analytics:
             entity_seen: dict[str, dict[str, Any]] = defaultdict(lambda: {
                 "scanner": "", "kind": "", "first": None, "last": None, "obs": 0,
                 "rssis": [], "is_random_mac": None, "vendor": None, "name": None,
+                "obs_log": [],   # list of (ts_unix, rssi) for visit segmentation
             })
             scanner_hour_counts: dict[tuple[str, int], int] = defaultdict(int)
             midband_hour_energy: dict[tuple[str, int], list[float]] = defaultdict(list)
@@ -180,12 +254,15 @@ class Analytics:
                 e["first"] = ts_unix if e["first"] is None else min(e["first"], ts_unix)
                 e["last"] = ts_unix if e["last"] is None else max(e["last"], ts_unix)
                 e["obs"] += 1
+                rssi_int = None
                 rssi = feats.get("rssi")
                 if rssi is not None:
                     try:
-                        e["rssis"].append(int(rssi))
+                        rssi_int = int(rssi)
+                        e["rssis"].append(rssi_int)
                     except (TypeError, ValueError):
                         pass
+                e["obs_log"].append((ts_unix, rssi_int))
                 e["is_random_mac"] = feats.get("is_random_mac") if e["is_random_mac"] is None else e["is_random_mac"]
                 e["vendor"] = e["vendor"] or feats.get("vendor_oui")
                 e["name"] = e["name"] or feats.get("local_name")
@@ -257,8 +334,8 @@ class Analytics:
                         last_updated_unix = excluded.last_updated_unix
                 """, (feat, hw, n2, mean2, m22, now))
 
-            # Roll up visits for entities we just touched.
-            self._roll_visits(conn, list(entity_seen.keys()))
+            # Roll up visits for entities we just touched, using the in-memory observation logs.
+            self._update_visits_from_logs(conn, entity_seen)
 
             # Compute regularity + anomaly scores for ALL entities (cheap).
             self._score_entities(conn)
@@ -275,6 +352,84 @@ class Analytics:
                 "entities_touched": len(entity_seen),
                 "high_water_id": last_seen_id,
             }
+
+    def _update_visits_from_logs(self, conn, entity_seen: dict[str, dict]) -> None:
+        """Append observation timestamps to entity_visits.
+
+        Strategy: for each entity, find the most-recent existing visit. If the
+        new observations connect to it (gap < VISIT_GAP_SEC), extend it.
+        Otherwise close that visit and start a new one. This is incremental
+        and idempotent across reruns.
+        """
+        for eid, data in entity_seen.items():
+            obs = sorted(data["obs_log"], key=lambda x: x[0])
+            if not obs:
+                continue
+            # Find the most-recent existing visit for this entity.
+            row = conn.execute(
+                "SELECT visit_id, start_unix, end_unix, observation_count, max_rssi, avg_rssi FROM entity_visits WHERE entity_id = ? ORDER BY end_unix DESC LIMIT 1",
+                (eid,),
+            ).fetchone()
+            current = None
+            if row:
+                vid, vstart, vend, vcount, vmax, vavg = row
+                # Connect if first new obs is within gap.
+                if obs[0][0] - vend <= VISIT_GAP_SEC:
+                    current = {
+                        "visit_id": vid, "start": vstart, "end": vend,
+                        "obs_count": vcount, "rssis": [],
+                        "avg_seed_count": vcount, "avg_seed_value": vavg,
+                        "max_rssi": vmax,
+                    }
+            new_visits: list[dict] = []
+            for ts, rssi in obs:
+                if current is None or (ts - current["end"]) > VISIT_GAP_SEC:
+                    if current is not None:
+                        new_visits.append(current)
+                    current = {
+                        "visit_id": str(ULID()), "start": ts, "end": ts,
+                        "obs_count": 0, "rssis": [],
+                        "avg_seed_count": 0, "avg_seed_value": None,
+                        "max_rssi": None,
+                    }
+                current["end"] = ts
+                current["obs_count"] += 1
+                if rssi is not None:
+                    current["rssis"].append(rssi)
+                    if current["max_rssi"] is None or rssi > current["max_rssi"]:
+                        current["max_rssi"] = rssi
+            if current is not None:
+                new_visits.append(current)
+
+            for v in new_visits:
+                # Re-compute incremental avg from seed + new rssis.
+                seed_count = v["avg_seed_count"]
+                seed_value = v["avg_seed_value"] or 0.0
+                new_n = len(v["rssis"])
+                total_n = seed_count + new_n
+                if total_n > 0:
+                    sum_existing = seed_value * seed_count
+                    sum_new = sum(v["rssis"])
+                    avg = (sum_existing + sum_new) / total_n
+                else:
+                    avg = None
+                conn.execute("""
+                    INSERT INTO entity_visits
+                        (visit_id, entity_id, start_unix, end_unix, duration_sec, observation_count, avg_rssi, max_rssi)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(visit_id) DO UPDATE SET
+                        end_unix = excluded.end_unix,
+                        duration_sec = excluded.duration_sec,
+                        observation_count = excluded.observation_count,
+                        avg_rssi = excluded.avg_rssi,
+                        max_rssi = excluded.max_rssi
+                """, (v["visit_id"], eid, v["start"], v["end"], max(1, v["end"] - v["start"]),
+                      v["obs_count"], avg, v["max_rssi"]))
+
+            conn.execute(
+                "UPDATE entities SET visit_count = (SELECT COUNT(*) FROM entity_visits WHERE entity_id = ?) WHERE entity_id = ?",
+                (eid, eid),
+            )
 
     def _roll_visits(self, conn, entity_ids: list[str]) -> None:
         """Build entity_visits from raw_events for the given entities. Idempotent: deletes the last open visit for each entity then rebuilds tail."""
@@ -424,50 +579,65 @@ class Analytics:
         now = int(time.time())
         recent_threshold = now - 300
 
-        # Rule: anchor_absent_unknown_linger
-        # Trigger: entity currently present (last_seen < 120s) AND no classification AND no anchor home AND duration > LINGER_THRESHOLD_SEC
-        candidates = conn.execute(
-            """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi, e.anomaly_score, e.regularity,
-                      (SELECT MAX(duration_sec) FROM entity_visits v WHERE v.entity_id = e.entity_id AND v.end_unix > ?) AS longest_recent
-               FROM entities e
-               WHERE e.last_seen_unix > ?
-                 AND e.classification IS NULL
-                 AND COALESCE(e.anomaly_score, 0) >= 0.5""",
-            (now - 600, now - 120),
-        ).fetchall()
-
         anchor_present = conn.execute(
             "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
             (now - ANCHOR_TIMEOUT_SEC,),
         ).fetchone()
-        home_state = "home" if anchor_present else "away"
+        any_anchor_enrolled = conn.execute(
+            "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
+        ).fetchone() is not None
+        # If no anchors are enrolled at all, we can't tell home vs away — mark unknown.
+        if not any_anchor_enrolled:
+            home_state = "unknown"
+        elif anchor_present:
+            home_state = "home"
+        else:
+            home_state = "away"
 
-        for entity_id, last_seen, avg_rssi, anomaly, regularity, longest in candidates:
-            if longest is None or longest < LINGER_THRESHOLD_SEC:
-                continue
-            severity = "high" if (home_state == "away" and anomaly >= 0.6) else "medium"
-            # Dedupe: skip if existing alert in last 5 min for same entity+rule.
+        # Hour-of-day for after-hours boost (local-time would be ideal but UTC works for v1).
+        hour_utc = (now // 3600) % 24
+        # Treat 22:00-06:00 UTC as "after hours" (user can refine for their tz).
+        is_after_hours = hour_utc >= 22 or hour_utc < 6
+
+        def _fire(rule_id, severity, entity_id, score, evidence):
             existing = conn.execute(
-                "SELECT 1 FROM alerts WHERE rule_id = 'anchor_absent_unknown_linger' AND entity_id = ? AND ts_unix > ? LIMIT 1",
-                (entity_id, recent_threshold),
+                "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id IS ? AND ts_unix > ? LIMIT 1",
+                (rule_id, entity_id, recent_threshold),
             ).fetchone()
             if existing:
-                continue
-            evidence = {
-                "longest_recent_sec": longest,
-                "anomaly_score": anomaly,
-                "regularity": regularity,
-                "avg_rssi": avg_rssi,
-                "home_state": home_state,
-            }
+                return
             conn.execute(
                 """INSERT INTO alerts (alert_id, ts_unix, rule_id, severity, entity_id, score, home_state, evidence_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(ULID()), now, "anchor_absent_unknown_linger", severity, entity_id,
-                 anomaly, home_state, json.dumps(evidence)),
+                (str(ULID()), now, rule_id, severity, entity_id,
+                 score, home_state, json.dumps(evidence)),
             )
 
-        # Rule: subghz_keyfob_or_garage_unknown — any keyfob/garage emission in last 5 min.
+        # ---- Rule 1: anchor_absent_unknown_linger ----
+        # Only meaningful if we know who's home — i.e., at least one anchor enrolled.
+        if any_anchor_enrolled:
+            candidates = conn.execute(
+                """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi, e.anomaly_score, e.regularity,
+                          (SELECT MAX(duration_sec) FROM entity_visits v WHERE v.entity_id = e.entity_id AND v.end_unix > ?) AS longest_recent
+                   FROM entities e
+                   WHERE e.last_seen_unix > ?
+                     AND e.classification IS NULL
+                     AND COALESCE(e.anomaly_score, 0) >= 0.5""",
+                (now - 600, now - 120),
+            ).fetchall()
+            for entity_id, last_seen, avg_rssi, anomaly, regularity, longest in candidates:
+                if longest is None or longest < LINGER_THRESHOLD_SEC:
+                    continue
+                severity = "high" if (home_state == "away" and anomaly >= 0.6) else "medium"
+                _fire("anchor_absent_unknown_linger", severity, entity_id, anomaly, {
+                    "longest_recent_sec": longest,
+                    "anomaly_score": round(anomaly, 3),
+                    "regularity": round(regularity or 0, 3),
+                    "avg_rssi": avg_rssi,
+                    "home_state": home_state,
+                })
+
+        # ---- Rule 2: sub-GHz keyfob / garage emission from unknown source ----
         for kind, rule in (("subghz_keyfob", "unknown_keyfob_emission"),
                             ("subghz_garage", "unknown_garage_emission")):
             recent = conn.execute(
@@ -477,15 +647,93 @@ class Analytics:
                 (kind, recent_threshold),
             ).fetchall()
             for entity_id, last_seen in recent:
-                existing = conn.execute(
-                    "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id = ? AND ts_unix > ? LIMIT 1",
-                    (rule, entity_id, recent_threshold),
-                ).fetchone()
-                if existing:
+                _fire(rule, "high" if home_state == "away" else "medium",
+                      entity_id, 0.8, {"home_state": home_state})
+
+        # ---- Rule 3: AirTag / Find-My broadcast ----
+        # Continuous Find-My presence near the property is worth flagging.
+        airtag = conn.execute(
+            """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
+               FROM entities e
+               WHERE e.entity_id = 'ble:apple:Find-My'
+                 AND e.last_seen_unix > ?
+                 AND e.classification IS NULL""",
+            (now - 600,),
+        ).fetchone()
+        if airtag:
+            entity_id, last_seen, avg_rssi = airtag
+            # Heuristic severity: stronger signal = closer = more concerning.
+            close = avg_rssi is not None and avg_rssi > -65
+            severity = "high" if (home_state == "away" or close) else "medium"
+            _fire("airtag_findmy_present", severity, entity_id, 0.7 if close else 0.5, {
+                "avg_rssi": avg_rssi,
+                "home_state": home_state,
+                "explanation": "Apple Find-My (AirTag, lost AirPods, etc.) broadcast detected near property. "
+                               "If this is yours, mark it as known.",
+            })
+
+        # ---- Rule 4: first-time visitor at after-hours ----
+        # Skip if no anchors are enrolled (we can't reason about who "should" be here).
+        if is_after_hours and any_anchor_enrolled:
+            new_recent = conn.execute(
+                """SELECT entity_id, first_seen_unix, last_seen_unix, avg_rssi
+                   FROM entities
+                   WHERE first_seen_unix > ?
+                     AND last_seen_unix > ?
+                     AND classification IS NULL""",
+                (now - 1800, now - 300),
+            ).fetchall()
+            for entity_id, first_seen, last_seen, avg_rssi in new_recent:
+                # Skip very-distant signals.
+                if avg_rssi is not None and avg_rssi < -85:
                     continue
-                conn.execute(
-                    """INSERT INTO alerts (alert_id, ts_unix, rule_id, severity, entity_id, score, home_state, evidence_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (str(ULID()), now, rule, "high" if home_state == "away" else "medium",
-                     entity_id, 0.8, home_state, json.dumps({"home_state": home_state})),
-                )
+                _fire("first_time_visitor_after_hours", "medium" if home_state == "home" else "high",
+                      entity_id, 0.55, {
+                          "first_seen_minutes_ago": (now - first_seen) // 60,
+                          "avg_rssi": avg_rssi,
+                          "home_state": home_state,
+                      })
+
+        # ---- Rule 5: strong RSSI on close perimeter from unknown ----
+        # Limit to BLE entities (WiFi APs are stationary by nature; their RSSI being close
+        # is expected). Also require recent visit churn (varying presence) so we don't fire
+        # on stationary BLE IoT (TVs, smart bulbs).
+        very_close = conn.execute(
+            """SELECT e.entity_id, e.avg_rssi, e.visit_count, e.total_observations
+               FROM entities e
+               WHERE e.classification IS NULL
+                 AND e.avg_rssi IS NOT NULL AND e.avg_rssi > -50
+                 AND e.last_seen_unix > ?
+                 AND e.entity_id LIKE 'ble:%'
+                 AND e.visit_count > 1               -- has come and gone, not stationary
+                 AND e.total_observations < 5000     -- stationary BLE IoT have huge counts; skip those""",
+            (now - 300,),
+        ).fetchall()
+        for entity_id, avg_rssi, visit_count, total_obs in very_close:
+            severity = "high" if home_state == "away" else "medium"
+            _fire("close_unknown_signal", severity, entity_id, 0.6, {
+                "avg_rssi": avg_rssi,
+                "visit_count": visit_count,
+                "home_state": home_state,
+                "explanation": "Unknown mobile device very close to the Pi (RSSI > -50 dBm) "
+                               "with recurring presence. If this is yours, enroll it on the Discover tab.",
+            })
+
+        # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
+        rogue_wifi = conn.execute(
+            """SELECT entity_id, avg_rssi, friendly_name
+               FROM entities
+               WHERE entity_id LIKE 'wifi:mac:%'
+                 AND is_random_mac = 1
+                 AND avg_rssi IS NOT NULL AND avg_rssi > -65
+                 AND last_seen_unix > ?
+                 AND classification IS NULL""",
+            (now - 300,),
+        ).fetchall()
+        for entity_id, avg_rssi, name in rogue_wifi:
+            _fire("rogue_hotspot", "medium", entity_id, 0.5, {
+                "avg_rssi": avg_rssi,
+                "ssid": name,
+                "explanation": "A random-BSSID Wi-Fi AP with strong signal — looks like a phone hotspot "
+                               "or rogue AP very close to the property.",
+            })

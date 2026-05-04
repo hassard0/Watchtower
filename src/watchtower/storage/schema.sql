@@ -99,6 +99,42 @@ CREATE TABLE IF NOT EXISTS analytics_state (
     updated_unix INTEGER NOT NULL DEFAULT 0
 );
 
--- Set schema version to 2 (idempotent migration from v1).
-DELETE FROM schema_meta WHERE version < 2;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (2);
+-- v3: zones + site-survey probe captures (phone-as-probe calibration).
+
+-- A logical location label like "front porch", "driveway", "kitchen".
+CREATE TABLE IF NOT EXISTS zones (
+    zone_id           TEXT PRIMARY KEY,
+    name              TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    perimeter         INTEGER NOT NULL DEFAULT 0,  -- 1 = outdoor/perimeter, gates rules
+    excluded_alerts   INTEGER NOT NULL DEFAULT 0,  -- 1 = noise zone (e.g., "street")
+    created_unix      INTEGER NOT NULL,
+    sample_count      INTEGER NOT NULL DEFAULT 0,
+    notes             TEXT
+);
+
+-- One capture window's worth of fingerprint data — averaged into the zone.
+CREATE TABLE IF NOT EXISTS zone_samples (
+    sample_id        TEXT PRIMARY KEY,
+    zone_id          TEXT NOT NULL,
+    captured_unix    INTEGER NOT NULL,
+    duration_sec     INTEGER NOT NULL,
+    fingerprint_json TEXT NOT NULL,
+    FOREIGN KEY (zone_id) REFERENCES zones(zone_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_zone_samples_zone ON zone_samples(zone_id);
+
+-- In-progress probe captures. Cleared when consumed.
+CREATE TABLE IF NOT EXISTS probe_captures (
+    capture_id       TEXT PRIMARY KEY,            -- ULID
+    zone_name        TEXT NOT NULL,               -- target label (zone may be created on save)
+    started_unix     INTEGER NOT NULL,
+    ends_unix        INTEGER NOT NULL,
+    status           TEXT NOT NULL,               -- pending | done | discarded
+    fingerprint_json TEXT,
+    notes            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_probe_captures_status ON probe_captures(status);
+
+-- Set schema version to 3 (idempotent migration).
+DELETE FROM schema_meta WHERE version < 3;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (3);

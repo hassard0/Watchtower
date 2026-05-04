@@ -18,7 +18,8 @@ adapter = "hci0"
 
 [scanners.wifi]
 enabled = true
-interface = "wlan1"  # USB monitor-mode adapter; gracefully stubs if absent
+interface = "wlan0"        # Pi's built-in WiFi (active scan, non-destructive)
+scan_interval_sec = 30.0
 
 [scanners.subghz]
 enabled = true

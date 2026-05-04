@@ -15,12 +15,16 @@ StandardOutput=append:/var/log/watchtower/watchtower.log
 StandardError=append:/var/log/watchtower/watchtower.err
 
 # Security hardening (loosened for hardware access).
-NoNewPrivileges=true
+# NoNewPrivileges must be false so AmbientCapabilities can grant CAP_NET_ADMIN
+# (needed for `iw dev wlan0 scan` from the WifiScanner).
+NoNewPrivileges=false
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 # Bluetooth + USB SDR access requires non-restricted device groups.
-SupplementaryGroups=bluetooth plugdev
+SupplementaryGroups=bluetooth plugdev netdev
 
 [Install]
 WantedBy=multi-user.target

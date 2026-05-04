@@ -105,6 +105,10 @@ tailwind.config = {
         <span class="text-xs num ml-1" x-text="state.alerts_unack_24h"></span>
         <span class="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-threat" x-show="state.alerts_unack_24h > 0"></span>
       </button>
+      <a href="/probe" class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-signal-deep/15 border border-signal-deep/40 hover:border-signal-deep/80 transition group">
+        <svg class="w-4 h-4 text-signal-deep group-hover:text-signal-glow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 5V3M12 21v-2M5 12H3M21 12h-2M7 7l-1.4-1.4M18.4 18.4 17 17M7 17l-1.4 1.4M18.4 5.6 17 7"/></svg>
+        <span class="text-xs font-medium text-signal-deep group-hover:text-signal-glow">Probe</span>
+      </a>
       <button @click="refresh()" class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition" :class="loading && 'animate-spin'">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
       </button>
@@ -329,6 +333,174 @@ tailwind.config = {
           </template>
           <div x-show="baselineRows.length === 0" class="text-xs text-slate-500 text-center py-4">baseline accumulating — show real data after ~14 days</div>
         </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: DISCOVER                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'discover'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-5">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-signal-deep to-signal-glow flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 21l-6-6"/><circle cx="10" cy="10" r="7"/></svg>
+          </div>
+          <div class="flex-1">
+            <div class="text-base font-semibold">Discover &amp; enroll</div>
+            <div class="text-[11px] text-slate-500">Devices we keep seeing — mark them so the system knows what's normal</div>
+          </div>
+          <button @click="loadDiscovery()" class="text-[10px] text-signal-glow hover:text-signal-pulse">refresh</button>
+        </div>
+        <div class="text-xs text-slate-400 leading-relaxed">
+          <span class="text-anchor font-medium">Anchor</span> = your phone, defines &quot;home&quot;. <span class="text-satellite font-medium">Satellite</span> = your watch / earbuds / kids' phone. <span class="text-guest font-medium">Known guest</span> = recurring visitor. <span class="text-threat font-medium">Untrusted</span> = a device you don't want here.
+        </div>
+      </div>
+
+      <div class="space-y-1.5">
+        <template x-for="c in discoveryCandidates" :key="c.entity_id">
+          <div class="glass rounded-xl p-3 flex items-center gap-3">
+            <div class="relative w-10 h-10 flex-shrink-0">
+              <div class="absolute inset-0 rounded-full anomaly-ring"
+                   :style="`--score: ${c.anomaly_score || 0}; --ring-color: ${heatColor(c.anomaly_score || 0)}`"></div>
+              <div class="absolute inset-1 rounded-full bg-ink-900 flex items-center justify-center text-[10px] font-bold num"
+                   :style="`color: ${heatColor(c.anomaly_score || 0)}`"
+                   x-text="Math.round((c.anomaly_score || 0) * 100)"></div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-medium" x-text="entityDisplayName(c)"></span>
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(c.kind)" x-text="c.kind?.replace(/_/g,' ')"></span>
+              </div>
+              <div class="text-[10px] text-slate-500 num truncate" x-text="`${c.total_observations.toLocaleString()} obs · ${c.visit_count} visits · ${Math.round((c.regularity || 0) * 100)}% regular · ${relTime(c.last_seen_unix)}`"></div>
+            </div>
+            <div class="hidden sm:flex flex-col gap-1">
+              <button @click="quickClassify(c, 'anchor')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-anchor/40 text-anchor hover:bg-anchor/10">anchor</button>
+              <button @click="quickClassify(c, 'satellite')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-satellite/40 text-satellite hover:bg-satellite/10">satellite</button>
+            </div>
+            <div class="flex flex-col gap-1">
+              <button @click="quickClassify(c, 'known_guest')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-guest/40 text-guest hover:bg-guest/10">guest</button>
+              <button @click="quickClassify(c, 'untrusted')" class="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-threat/40 text-threat hover:bg-threat/10">untrusted</button>
+            </div>
+            <button @click="openEntity(c.entity_id)" class="text-slate-500 hover:text-slate-200 px-1">→</button>
+          </div>
+        </template>
+        <div x-show="discoveryCandidates.length === 0" class="text-xs text-slate-500 text-center py-12 glass rounded-xl">no candidates yet — let the system observe for a few hours, then check back</div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: SPECTRUM                                                         -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'spectrum'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500">Spectrum</div>
+            <div class="text-base font-semibold">RF energy across watched bands</div>
+          </div>
+          <div class="text-[10px] text-slate-500 num"><span x-text="spectrum.midband_samples?.length || 0"></span> samples · last 5 min</div>
+        </div>
+      </div>
+
+      <!-- Per-band rolling sparklines -->
+      <div class="glass rounded-2xl p-4 space-y-3">
+        <template x-for="b in spectrumBands" :key="b.band">
+          <div>
+            <div class="flex items-baseline justify-between mb-1">
+              <div class="text-sm font-medium" x-text="b.label"></div>
+              <div class="text-[10px] num text-slate-500">
+                <span class="text-slate-300" x-text="b.last.toFixed(1) + ' dBm'"></span>
+                <span class="mx-1 text-slate-700">·</span>
+                <span x-text="b.freq_label"></span>
+              </div>
+            </div>
+            <svg class="w-full h-12" :viewBox="`0 0 ${b.points.length} 100`" preserveAspectRatio="none">
+              <defs>
+                <linearGradient :id="'spec-grad-' + b.band" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#00ff88" stop-opacity="0.6"/>
+                  <stop offset="100%" stop-color="#00ff88" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <polygon :points="b.svgPolygon" :fill="`url(#spec-grad-${b.band})`"/>
+              <polyline :points="b.svgLine" fill="none" stroke="#00d9ff" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+            </svg>
+          </div>
+        </template>
+        <div x-show="spectrumBands.length === 0" class="text-xs text-slate-500 text-center py-8">spectrum data still warming up</div>
+      </div>
+
+      <!-- Sub-GHz decode log -->
+      <div class="glass rounded-2xl p-4">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[10px] uppercase tracking-widest text-slate-500">Sub-GHz protocol decodes (last hour)</div>
+          <div class="text-[10px] num text-slate-500" x-text="(spectrum.subghz_decodes?.length || 0) + ' decodes'"></div>
+        </div>
+        <div class="space-y-0.5 max-h-64 overflow-y-auto scrollbar">
+          <template x-for="d in (spectrum.subghz_decodes || [])" :key="d.ts_unix">
+            <div class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-ink-700/40">
+              <span class="text-[10px] num text-slate-500 w-20" x-text="formatTime(d.ts_unix)"></span>
+              <span class="font-mono text-slate-300 flex-1 truncate" x-text="d.protocol"></span>
+              <span class="text-[10px] num text-slate-500" x-text="d.freq_hz ? (d.freq_hz/1e6).toFixed(2) + ' MHz' : '—'"></span>
+            </div>
+          </template>
+          <div x-show="(spectrum.subghz_decodes || []).length === 0" class="text-xs text-slate-500 text-center py-6">
+            no key-fob, garage, or sensor decodes yet — these are sporadic by nature
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB: ZONES                                                            -->
+    <!-- =================================================================== -->
+    <section x-show="tab === 'zones'" class="animate-fade-in space-y-3">
+      <div class="glass-strong rounded-2xl p-5">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-signal-warm to-signal-hot flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          </div>
+          <div class="flex-1">
+            <div class="text-base font-semibold">Zone calibration</div>
+            <div class="text-[11px] text-slate-500">Walk around with your phone &amp; capture RF fingerprints per location</div>
+          </div>
+          <a href="/probe" class="px-3 py-1.5 rounded-md bg-signal-deep text-white text-xs font-medium shadow shadow-signal-deep/30 hover:bg-signal-glow transition">+ probe</a>
+        </div>
+      </div>
+
+      <div class="glass rounded-2xl overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-600/40">
+            <tr>
+              <th class="text-left px-4 py-2.5 font-medium">Zone</th>
+              <th class="text-left px-2 py-2.5 font-medium">Type</th>
+              <th class="text-right px-2 py-2.5 font-medium">Samples</th>
+              <th class="text-right px-4 py-2.5 font-medium">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="z in zones" :key="z.zone_id">
+              <tr class="border-b border-ink-600/20 hover:bg-ink-700/40 transition">
+                <td class="px-4 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full" :class="z.perimeter ? 'bg-signal-warm' : 'bg-signal-deep'"></span>
+                    <span class="font-medium" x-text="z.name"></span>
+                    <span x-show="z.excluded_alerts" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-slate-700 text-slate-400">muted</span>
+                  </div>
+                </td>
+                <td class="px-2 py-2.5">
+                  <span class="text-[10px] uppercase tracking-wider"
+                        :class="z.perimeter ? 'text-signal-warm' : 'text-slate-400'"
+                        x-text="z.perimeter ? 'perimeter' : 'interior'"></span>
+                </td>
+                <td class="px-2 py-2.5 text-right num text-slate-400" x-text="z.sample_count"></td>
+                <td class="px-4 py-2.5 text-right text-[11px] num text-slate-500" x-text="relTime(z.created_unix)"></td>
+              </tr>
+            </template>
+            <tr x-show="zones.length === 0">
+              <td colspan="4" class="text-xs text-slate-500 text-center py-12">no calibrated zones yet — open <a href="/probe" class="text-signal-glow underline">/probe</a> on your phone</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
 

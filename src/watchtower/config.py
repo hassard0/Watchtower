@@ -38,7 +38,8 @@ class BleCfg:
 @dataclass
 class WifiCfg:
     enabled: bool = True
-    interface: str = "wlan1"
+    interface: str = "wlan0"
+    scan_interval_sec: float = 30.0
 
 
 @dataclass

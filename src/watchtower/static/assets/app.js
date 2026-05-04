@@ -5,6 +5,9 @@ function watchtower() {
     entities: [],
     alerts: [],
     visits: [],
+    discoveryCandidates: [],
+    spectrum: { midband_samples: [], subghz_decodes: [] },
+    zones: [],
     entityDetail: null,
     loading: false,
     now: '',
@@ -15,8 +18,11 @@ function watchtower() {
 
     tabs: [
       { id: 'overview',  label: 'Overview',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>' },
+      { id: 'discover',  label: 'Discover',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="7"/><path d="M21 21l-6-6"/></svg>' },
       { id: 'entities',  label: 'Entities',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="11" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M14 21v-2a3 3 0 0 1 3-3h2"/></svg>' },
       { id: 'timeline',  label: 'Timeline',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="3" rx="1"/><rect x="6" y="11" width="12" height="3" rx="1"/><rect x="3" y="16" width="14" height="3" rx="1"/></svg>' },
+      { id: 'spectrum',  label: 'Spectrum',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h2l3-9 6 18 3-9h6"/></svg>' },
+      { id: 'zones',     label: 'Zones',     icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
       { id: 'alerts',    label: 'Alerts',    icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>' },
     ],
 
@@ -59,12 +65,12 @@ function watchtower() {
     async refresh() {
       this.loading = true;
       try {
-        await Promise.all([
-          this.loadState(),
-          this.loadEntities(),
-          this.loadAlerts(),
-          this.tab === 'timeline' ? this.loadTimeline() : Promise.resolve(),
-        ]);
+        const tasks = [this.loadState(), this.loadEntities(), this.loadAlerts()];
+        if (this.tab === 'timeline')  tasks.push(this.loadTimeline());
+        if (this.tab === 'spectrum')  tasks.push(this.loadSpectrum());
+        if (this.tab === 'zones')     tasks.push(this.loadZones());
+        if (this.tab === 'discover')  tasks.push(this.loadDiscovery());
+        await Promise.all(tasks);
       } finally {
         this.loading = false;
       }
@@ -101,6 +107,42 @@ function watchtower() {
         const j = await r.json();
         this.visits = j.visits || [];
       } catch (e) { console.warn('loadTimeline', e); }
+    },
+
+    async loadSpectrum() {
+      try {
+        const r = await fetch('/api/spectrum');
+        this.spectrum = await r.json();
+      } catch (e) { console.warn('loadSpectrum', e); }
+    },
+
+    async loadZones() {
+      try {
+        const r = await fetch('/api/zones');
+        const j = await r.json();
+        this.zones = j.zones || [];
+      } catch (e) { console.warn('loadZones', e); }
+    },
+
+    async loadDiscovery() {
+      try {
+        const r = await fetch('/api/discovery');
+        const j = await r.json();
+        this.discoveryCandidates = j.candidates || [];
+      } catch (e) { console.warn('loadDiscovery', e); }
+    },
+
+    async quickClassify(c, classification) {
+      try {
+        await fetch(`/api/entities/${encodeURIComponent(c.entity_id)}/classify`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ classification }),
+        });
+        c.classification = classification;
+        await this.loadDiscovery();
+        await this.loadEntities();
+        await this.loadState();
+      } catch (e) { console.warn('quickClassify', e); }
     },
 
     async openEntity(eid) {
@@ -169,6 +211,7 @@ function watchtower() {
     },
 
     get heroHeadline() {
+      if (this.state.any_anchor_enrolled === false) return 'SETUP';
       if (this.state.home_state === 'home') {
         return this.state.entities?.anomalous_now > 0 ? 'WATCHING' : 'CALM';
       }
@@ -182,6 +225,9 @@ function watchtower() {
       const a = this.state.entities?.anomalous_now ?? 0;
       const u = this.state.entities?.unknown ?? 0;
       const act = this.state.entities?.active_now ?? 0;
+      if (this.state.any_anchor_enrolled === false) {
+        return `Tap Discover → mark your phone as ANCHOR so the system knows when you're home. ${act} entities currently in range.`;
+      }
       if (a > 0) {
         const verb = this.state.home_state === 'away' ? 'while you are away' : 'in range';
         return `${a} entit${a===1?'y':'ies'} flagged ${verb} · ${act} active now`;
@@ -293,6 +339,58 @@ function watchtower() {
       // JS getDay: 0=Sun..6=Sat. We use Monday=0 mapping in backend.
       const dow = (d.getUTCDay() + 6) % 7;
       return dow * 24 + d.getUTCHours();
+    },
+
+    get spectrumBands() {
+      const samples = this.spectrum?.midband_samples || [];
+      if (!samples.length) return [];
+      const byBand = {};
+      // samples are returned newest-first; reverse to chronological
+      const ordered = samples.slice().reverse();
+      for (const s of ordered) {
+        if (!byBand[s.band]) byBand[s.band] = [];
+        byBand[s.band].push(s);
+      }
+      const out = [];
+      for (const [band, points] of Object.entries(byBand)) {
+        if (points.length === 0) continue;
+        const energies = points.map(p => p.energy_dbm);
+        const lo = Math.min(...energies, -100);
+        const hi = Math.max(...energies, -50);
+        const range = Math.max(1, hi - lo);
+        const last = energies[energies.length - 1];
+        // SVG polyline: x = index, y = 100*(1 - (e - lo)/range)
+        const linePts = points.map((p, i) => `${i},${(100 * (1 - (p.energy_dbm - lo) / range)).toFixed(1)}`).join(' ');
+        const polyPts = `0,100 ${linePts} ${points.length - 1},100`;
+        const freq_label = points[points.length - 1].freq_hz
+          ? (points[points.length - 1].freq_hz / 1e6).toFixed(1) + ' MHz'
+          : '';
+        out.push({
+          band,
+          label: this.bandLabel(band),
+          last,
+          points,
+          freq_label,
+          svgLine: linePts,
+          svgPolygon: polyPts,
+        });
+      }
+      // Sort: cellular first, then ISM, then GPS
+      const order = ['700MHz','850MHz','GSM900','900MHz','AviationBand','GPS-L1','OutOfBand'];
+      out.sort((a,b) => order.indexOf(a.band) - order.indexOf(b.band));
+      return out;
+    },
+
+    bandLabel(band) {
+      return ({
+        '700MHz': 'LTE 700 MHz (low-band cellular)',
+        '850MHz': 'Cellular 850 MHz',
+        'GSM900': 'Cellular 900 MHz (GSM)',
+        '900MHz': 'ISM 902-928 MHz (LoRa, sub-GHz IoT)',
+        'AviationBand': 'Aviation 108-138 MHz',
+        'GPS-L1': 'GPS L1 1.575 GHz (reference)',
+        'OutOfBand': 'Out of band',
+      })[band] || band;
     },
 
     get timelineFrom() { return Math.floor(Date.now()/1000) - this.timelineHours * 3600; },

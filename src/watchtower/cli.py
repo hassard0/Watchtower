@@ -65,7 +65,10 @@ async def _run_async(config_path: Path) -> None:
     if cfg.scanners.ble.enabled:
         scanners.append(BleScanner(adapter=cfg.scanners.ble.adapter))
     if cfg.scanners.wifi.enabled:
-        scanners.append(WifiScanner(interface=cfg.scanners.wifi.interface))
+        scanners.append(WifiScanner(
+            interface=cfg.scanners.wifi.interface,
+            scan_interval_sec=cfg.scanners.wifi.scan_interval_sec,
+        ))
     if cfg.scanners.subghz.enabled:
         scanners.append(SubGhzScanner(
             rtl_433_args=cfg.scanners.subghz.rtl_433_args,

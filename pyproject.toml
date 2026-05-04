@@ -45,4 +45,5 @@ packages = ["src/watchtower"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/watchtower/storage/schema.sql" = "watchtower/storage/schema.sql"
 "src/watchtower/static/index.html" = "watchtower/static/index.html"
+"src/watchtower/static/probe.html" = "watchtower/static/probe.html"
 "src/watchtower/static/assets/app.js" = "watchtower/static/assets/app.js"

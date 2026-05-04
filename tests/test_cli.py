@@ -15,7 +15,7 @@ def test_cli_db_init_creates_schema(tmp_path: Path):
     assert db.exists()
     with sqlite3.connect(db) as conn:
         v = conn.execute("SELECT version FROM schema_meta").fetchone()
-    assert v[0] == 2
+    assert v[0] == 3
 
 
 def test_cli_help_lists_run_subcommand():

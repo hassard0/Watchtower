@@ -930,7 +930,7 @@ tailwind.config = {
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection rules</div>
         <div class="space-y-2">
-          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged']" :key="key">
+          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_findmy_persistent_tracker','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged']" :key="key">
             <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
               <input type="checkbox" x-model="settings[key]" @change="settingsDirty = true"
                      class="w-4 h-4 mt-0.5 rounded accent-signal-pulse">

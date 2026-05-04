@@ -48,6 +48,9 @@ DEFAULT_SETTINGS = {
     "rule_close_unknown_signal": True,
     "rule_rogue_hotspot": True,
     "rule_honeypot_engaged": True,
+    "rule_findmy_persistent_tracker": True,
+    "findmy_persistent_min_minutes_per_day": 180,
+    "findmy_persistent_min_consecutive_days": 3,
     "anomaly_severity_high_threshold": 0.6,
     "anomaly_severity_medium_threshold": 0.4,
     # M3+ extensions:
@@ -890,6 +893,53 @@ class Analytics:
                 "explanation": "Unknown mobile device very close to the Pi (RSSI > -50 dBm) "
                                "with recurring presence. If this is yours, enroll it on the Discover tab.",
             })
+
+        # ---- Rule 7: persistent Find-My tracker (anti-AirTag stalking) ----
+        # Apple Find-My beacon keys rotate every ~15 min so we can't track a
+        # specific AirTag long-term. But we can ask: has *any* Find-My
+        # broadcast been near the Pi for many minutes per day across multiple
+        # consecutive days? If yes, that's strong evidence of a stationary or
+        # following tracker (someone's planted an AirTag on the user's car or
+        # bag, or the user has their own — either way, surface it).
+        if S.get("rule_findmy_persistent_tracker", True):
+            min_min = int(S.get("findmy_persistent_min_minutes_per_day", 180))
+            min_days = int(S.get("findmy_persistent_min_consecutive_days", 3))
+            # Count distinct minutes-with-Find-My-events per day for last 7 days.
+            rows = conn.execute("""
+                WITH minute_buckets AS (
+                    SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
+                           CAST(ts_unix / 60 AS INTEGER) AS minute_bucket
+                    FROM raw_events
+                    WHERE scanner = 'ble_scanner'
+                      AND ts_unix > strftime('%s','now') - 7 * 86400
+                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                    GROUP BY day, minute_bucket
+                )
+                SELECT day, COUNT(*) AS minutes_with_findmy
+                FROM minute_buckets
+                GROUP BY day
+                ORDER BY day DESC
+            """).fetchall()
+            # Walk back: how many consecutive recent days had >= min_min minutes of Find-My?
+            consecutive = 0
+            for day, minutes in rows:
+                if minutes >= min_min:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive >= min_days:
+                _fire("findmy_persistent_tracker", "high", None, 0.8, {
+                    "consecutive_days": consecutive,
+                    "min_minutes_per_day": min_min,
+                    "recent_days": [{"day": d, "minutes_with_findmy": m} for d, m in rows[:7]],
+                    "explanation": (
+                        f"Apple Find-My beacons (AirTag, lost-AirPods, etc.) have been "
+                        f"in range >= {min_min} min/day for {consecutive} consecutive days. "
+                        f"This means a tracker is persistently near the property. If it's "
+                        f"yours (your wallet/keys/bag), enroll it. If not, someone may have "
+                        f"planted an AirTag on your car or belongings to track you."
+                    ),
+                })
 
         # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
         if not S["rule_rogue_hotspot"]:

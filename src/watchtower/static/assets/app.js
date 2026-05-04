@@ -311,9 +311,11 @@ function watchtower() {
         'rule_unknown_keyfob_emission':      'Unknown key-fob emission (sub-GHz)',
         'rule_unknown_garage_emission':      'Unknown garage-door emission (sub-GHz)',
         'rule_airtag_findmy_present':        'Apple Find-My / AirTag broadcast',
+        'rule_findmy_persistent_tracker':    'Persistent AirTag — anti-stalking',
         'rule_first_time_visitor_after_hours': 'First-time visitor after hours',
         'rule_close_unknown_signal':         'Strong-signal unknown nearby',
         'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
+        'rule_honeypot_engaged':             'Honeypot lure engaged',
       })[key] || key;
     },
     ruleDescription(key) {
@@ -321,10 +323,12 @@ function watchtower() {
         'rule_anchor_absent_unknown_linger': 'Fires when an unknown entity is present > linger threshold while no anchor is home.',
         'rule_unknown_keyfob_emission':      'Fires on unrecognized 315/433 MHz key-fob protocol activity.',
         'rule_unknown_garage_emission':      'Fires on unrecognized 315/390 MHz garage-door protocol activity.',
-        'rule_airtag_findmy_present':        'Fires on Apple Find-My broadcasts near the Pi.',
+        'rule_airtag_findmy_present':        'Fires on Apple Find-My broadcasts near the Pi at strong signal.',
+        'rule_findmy_persistent_tracker':    'Fires when Find-My beacons have been near for 3+ hr/day across 3+ consecutive days — suggests a stationary or following AirTag.',
         'rule_first_time_visitor_after_hours': 'New entity first-seen after-hours window. Requires at least one anchor enrolled.',
         'rule_close_unknown_signal':         'Mobile BLE device with very strong RSSI and recurring presence.',
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
+        'rule_honeypot_engaged':             'Fires when a device connects to one of our honeypot lures (Tesla key, smart lock, etc.).',
       })[key] || '';
     },
     async testNtfy() {

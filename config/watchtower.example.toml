@@ -1,0 +1,40 @@
+# Watchtower configuration.
+# Copy to /etc/watchtower/watchtower.toml on the Pi and edit.
+
+[storage]
+db_path = "/var/lib/watchtower/watchtower.db"
+retention_days = 7
+
+[bus]
+queue_size = 10000
+
+[logging]
+level = "INFO"
+format = "json"
+
+[scanners.ble]
+enabled = true
+adapter = "hci0"
+
+[scanners.wifi]
+enabled = true
+interface = "wlan1"  # USB monitor-mode adapter; gracefully stubs if absent
+
+[scanners.subghz]
+enabled = true
+device_index = 0          # which RTL-SDR (0 or 1)
+center_freq_hz = 433920000
+sample_rate_hz = 2048000
+rtl_433_args = ["-F", "json", "-d", "0", "-G", "5"]
+
+[scanners.midband]
+enabled = true
+device_index = 1          # the other RTL-SDR
+sweep_freqs_hz = [
+    734000000,    # LTE Band 12 lower
+    881000000,    # LTE Band 5 lower
+    944000000,    # GSM 900
+    1575420000,   # GPS L1 (energy reference, never has user signal)
+]
+dwell_seconds = 5
+sample_rate_hz = 2048000

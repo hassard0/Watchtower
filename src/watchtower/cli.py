@@ -8,7 +8,8 @@ from pathlib import Path
 
 import click
 
-from watchtower.analytics import Analytics
+from watchtower.active_probe import GattProber
+from watchtower.analytics import Analytics, load_settings
 from watchtower.api import ApiServer
 from watchtower.bus import Bus
 from watchtower.config import load_config
@@ -62,8 +63,10 @@ async def _run_async(config_path: Path) -> None:
     await sink.start()
 
     scanners = []
+    ble_scanner: BleScanner | None = None
     if cfg.scanners.ble.enabled:
-        scanners.append(BleScanner(adapter=cfg.scanners.ble.adapter))
+        ble_scanner = BleScanner(adapter=cfg.scanners.ble.adapter)
+        scanners.append(ble_scanner)
     if cfg.scanners.wifi.enabled:
         scanners.append(WifiScanner(
             interface=cfg.scanners.wifi.interface,
@@ -103,7 +106,18 @@ async def _run_async(config_path: Path) -> None:
     analytics_task = asyncio.create_task(_analytics_loop(stop, cfg.storage.db_path))
     scanner_tasks = [asyncio.create_task(s.start()) for s in scanners]
 
+    # Active GATT prober — toggle-able via settings.active_probing_enabled.
+    pause_factory = (lambda: ble_scanner.pause_for_probe()) if ble_scanner else None
+    gatt_prober = GattProber(
+        cfg.storage.db_path,
+        adapter=cfg.scanners.ble.adapter,
+        enabled_check=lambda: bool(load_settings(cfg.storage.db_path).get("active_probing_enabled")),
+        pause_scanner_factory=pause_factory,
+    )
+    prober_task = asyncio.create_task(gatt_prober.run(stop))
+
     api = ApiServer(cfg.storage.db_path, host="0.0.0.0", port=8080)
+    api.set_pause_scanner_factory(pause_factory)
     await api.start()
 
     await stop.wait()
@@ -112,7 +126,7 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
-    for t in (pruner_task, analytics_task):
+    for t in (pruner_task, analytics_task, prober_task):
         t.cancel()
         try:
             await t

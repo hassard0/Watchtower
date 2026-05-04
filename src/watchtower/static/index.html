@@ -808,7 +808,7 @@ tailwind.config = {
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection rules</div>
         <div class="space-y-2">
-          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot']" :key="key">
+          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged']" :key="key">
             <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
               <input type="checkbox" x-model="settings[key]" @change="settingsDirty = true"
                      class="w-4 h-4 mt-0.5 rounded accent-signal-pulse">
@@ -818,6 +818,42 @@ tailwind.config = {
               </div>
             </label>
           </template>
+        </div>
+      </div>
+
+      <!-- ACTIVE FEATURES -->
+      <div class="glass rounded-2xl p-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Active features</div>
+        <div class="space-y-3">
+          <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
+            <input type="checkbox" x-model="settings.active_probing_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
+            <div class="flex-1">
+              <div class="text-sm font-medium flex items-center gap-2">
+                <span>Active GATT probing</span>
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/15 text-signal-glow">advanced</span>
+              </div>
+              <div class="text-[11px] text-slate-500">Briefly connect to BLE devices to read their friendly name, manufacturer, and model. Most consumer devices respond. iPhones, AirTags, and locks reject. Off by default for privacy.</div>
+            </div>
+          </label>
+          <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
+            <input type="checkbox" x-model="settings.honeypot_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-threat">
+            <div class="flex-1">
+              <div class="text-sm font-medium flex items-center gap-2">
+                <span>BLE lure honeypot</span>
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-threat/15 text-threat">trap</span>
+              </div>
+              <div class="text-[11px] text-slate-500">Pi rotates through tantalizing BLE advertising names (Tesla key, smart lock, etc.). Anyone connecting to the lure fires a high-severity <span class="font-mono">honeypot_engaged</span> alert with their RF fingerprint.</div>
+            </div>
+          </label>
+          <div class="pl-7" x-show="settings.honeypot_enabled">
+            <label class="block">
+              <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Lure rotation interval (minutes)</div>
+              <input type="number" min="5" max="1440" x-model.number="settings.honeypot_rotate_minutes" @input="settingsDirty = true"
+                     class="w-32 bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-threat/40">
+            </label>
+          </div>
         </div>
       </div>
 
@@ -942,6 +978,23 @@ tailwind.config = {
                   <span x-text="c.label"></span>
                 </button>
               </template>
+            </div>
+          </div>
+
+          <!-- GATT probe -->
+          <div class="mb-4" x-show="entityDetail.entity?.entity_id?.startsWith('ble:mac:')">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Active probe</div>
+            <button @click="probeEntity()" :disabled="probing"
+                    class="px-3 py-1.5 rounded-md text-xs border border-signal-glow/40 text-signal-glow hover:bg-signal-glow/10 disabled:opacity-50 disabled:cursor-not-allowed">
+              <span x-show="!probing">⚡ Probe device for friendly name</span>
+              <span x-show="probing">probing… (up to 6s)</span>
+            </button>
+            <div x-show="probeResult" class="mt-2 text-xs">
+              <div x-show="probeResult?.ok" class="text-signal-pulse">
+                ✓ <span x-text="probeResult?.name || probeResult?.model || probeResult?.mfr"></span>
+                <span x-show="probeResult?.mfr" class="text-slate-500" x-text="' · ' + probeResult?.mfr"></span>
+              </div>
+              <div x-show="probeResult && !probeResult?.ok" class="text-slate-500 italic" x-text="'× ' + (probeResult?.error || 'no response — device probably refuses unauthenticated connections')"></div>
             </div>
           </div>
 

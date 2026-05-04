@@ -19,6 +19,7 @@ from typing import Any
 from aiohttp import web
 from ulid import ULID
 
+from watchtower.active_probe import probe_one, _apply_probe_result
 from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
 from watchtower.storage.db import get_connection
 
@@ -73,6 +74,7 @@ class ApiServer:
         self._app.router.add_get("/api/entities/{eid}", self.entity_detail)
         self._app.router.add_post("/api/entities/{eid}/classify", self.classify_entity)
         self._app.router.add_post("/api/entities/{eid}/name", self.rename_entity)
+        self._app.router.add_post("/api/entities/{eid}/probe", self.probe_entity)
         self._app.router.add_get("/api/alerts", self.alerts)
         self._app.router.add_post("/api/alerts/{aid}/feedback", self.alert_feedback)
         self._app.router.add_post("/api/alerts/{aid}/ack", self.alert_ack)
@@ -113,6 +115,11 @@ class ApiServer:
         self._site: web.TCPSite | None = None
         self._probe_task: asyncio.Task | None = None
         self._stopping = False
+        self._pause_scanner_factory = None
+
+    def set_pause_scanner_factory(self, factory) -> None:
+        """Inject a coordinator so on-demand probes can pause the BLE scanner."""
+        self._pause_scanner_factory = factory
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app, access_log=None)
@@ -411,6 +418,20 @@ class ApiServer:
             if cur.rowcount == 0:
                 return web.json_response({"error": "entity not found"}, status=404)
         return web.json_response({"ok": True, "friendly_name": name})
+
+    async def probe_entity(self, request: web.Request) -> web.Response:
+        """Synchronously fire a GATT probe at the entity's MAC and return the result.
+
+        Bypasses the scheduler — useful from the entity-detail UI button.
+        """
+        eid = request.match_info["eid"]
+        if not eid.startswith("ble:mac:"):
+            return web.json_response({"error": "only BLE entities with stable MACs can be GATT-probed"}, status=400)
+        mac = eid[len("ble:mac:"):]
+        result = await probe_one(mac, pause_scanner=self._pause_scanner_factory)
+        with get_connection(self._db) as conn:
+            _apply_probe_result(conn, eid, result)
+        return web.json_response({"ok": True, "result": result})
 
     async def alerts(self, request: web.Request) -> web.Response:
         since = int(request.query.get("since", str(int(time.time()) - 86400)))

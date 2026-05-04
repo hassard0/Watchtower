@@ -335,7 +335,31 @@ function watchtower() {
       try {
         const r = await fetch(`/api/entities/${encodeURIComponent(eid)}`);
         this.entityDetail = await r.json();
+        this.probeResult = null;
       } catch (e) { console.warn('openEntity', e); }
+    },
+
+    probing: false,
+    probeResult: null,
+    async probeEntity() {
+      if (!this.entityDetail || this.probing) return;
+      this.probing = true;
+      this.probeResult = null;
+      try {
+        const eid = this.entityDetail.entity.entity_id;
+        const r = await fetch(`/api/entities/${encodeURIComponent(eid)}/probe`, { method: 'POST' });
+        const j = await r.json();
+        this.probeResult = j.result;
+        if (j.result?.ok) {
+          // Reload entity to pick up new friendly_name.
+          await this.openEntity(eid);
+          await this.loadEntities();
+        }
+      } catch (e) {
+        this.probeResult = { ok: false, error: e.message };
+      } finally {
+        this.probing = false;
+      }
     },
 
     async classifyEntity(c) {

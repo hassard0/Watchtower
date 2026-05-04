@@ -47,8 +47,13 @@ DEFAULT_SETTINGS = {
     "rule_first_time_visitor_after_hours": True,
     "rule_close_unknown_signal": True,
     "rule_rogue_hotspot": True,
+    "rule_honeypot_engaged": True,
     "anomaly_severity_high_threshold": 0.6,
     "anomaly_severity_medium_threshold": 0.4,
+    # M3+ extensions:
+    "active_probing_enabled": False,         # GATT probe to fetch friendly names
+    "honeypot_enabled": False,                # rotating BLE lure broadcaster
+    "honeypot_rotate_minutes": 30,            # cycle through lure list every N min
 }
 
 

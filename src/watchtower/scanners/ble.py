@@ -74,6 +74,40 @@ class BleScanner(Scanner):
         # last-emitted-at per (mac, content_hash); periodically GC'd.
         self._last_emit: dict[tuple[str, int], float] = {}
         self._last_gc: float = 0.0
+        # Coordination with active GATT prober — when "paused", the scanner
+        # stops its BleakScanner so something else (the prober) can use the
+        # adapter exclusively.
+        self._pause_lock = asyncio.Lock()
+        self._scanner_instance = None
+
+    async def pause_for_probe(self):
+        """Async context manager: pause scanning while the body runs.
+
+        BlueZ on a single adapter doesn't reliably allow concurrent passive
+        scanning + outgoing GATT connect, so the prober uses this to take
+        exclusive access for a few seconds.
+        """
+        from contextlib import asynccontextmanager
+        scanner = self
+        @asynccontextmanager
+        async def _ctx():
+            async with scanner._pause_lock:
+                paused = False
+                if scanner._scanner_instance is not None:
+                    try:
+                        await scanner._scanner_instance.stop()
+                        paused = True
+                    except Exception:  # noqa: BLE001
+                        log.exception("ble: failed to pause scanner for probe")
+                try:
+                    yield
+                finally:
+                    if paused and scanner._scanner_instance is not None:
+                        try:
+                            await scanner._scanner_instance.start()
+                        except Exception:  # noqa: BLE001
+                            log.exception("ble: failed to resume scanner after probe")
+        return _ctx()
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -137,11 +171,13 @@ class BleScanner(Scanner):
                 log.exception("ble cb failed")
 
         scanner = BleakScanner(detection_callback=cb, adapter=self._adapter)
+        self._scanner_instance = scanner
         await scanner.start()
         try:
             # Stay alive until stopped.
             await self._stop_event.wait()
         finally:
+            self._scanner_instance = None
             try:
                 await scanner.stop()
             except Exception:  # noqa: BLE001

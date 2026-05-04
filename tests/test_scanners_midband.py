@@ -58,9 +58,15 @@ async def test_midband_scanner_emits_per_frequency(monkeypatch):
 
     # We should have at least one event per configured frequency.
     band_names = {ev.features.band_name for ev in received}
-    assert "700MHz" in band_names
-    assert "900MHz" in band_names
+    assert "LTE-700" in band_names
+    assert "ISM-902" in band_names
     for ev in received:
         assert ev.scanner == ScannerName.MIDBAND
-        assert ev.kind in (EventKind.CELLULAR_BAND_ENERGY, EventKind.LORA_EMISSION, EventKind.AVIATION_BAND_ENERGY)
+        assert ev.kind in (
+            EventKind.CELLULAR_BAND_ENERGY,
+            EventKind.LORA_EMISSION,
+            EventKind.AVIATION_BAND_ENERGY,
+            EventKind.WALKIETALKIE_EMISSION,
+            EventKind.KEYFOB_EMISSION,
+        )
         assert ev.features.energy_dbm is not None

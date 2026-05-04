@@ -31,11 +31,31 @@ rtl_433_args = ["-F", "json", "-d", "0"]   # rtl_433 25.02 deprecated -G; use de
 [scanners.midband]
 enabled = true
 device_index = 1          # the other RTL-SDR
+# Wide-band sweep across 24 MHz - 1.7 GHz. ~22-second full cycle at 1s dwell.
+# Covers FM, aviation, walkie-talkie, ISM, cellular, ADS-B, GPS.
 sweep_freqs_hz = [
-    734000000,    # LTE Band 12 lower
-    881000000,    # LTE Band 5 lower
-    944000000,    # GSM 900
-    1575420000,   # GPS L1 (energy reference, never has user signal)
+    25_000_000,
+    98_000_000,    # FM broadcast
+    122_000_000,   # aviation VHF
+    146_000_000,   # 2m amateur
+    155_000_000,   # business/marine VHF
+    162_550_000,   # NOAA weather radio
+    195_000_000,   # VHF-TV
+    315_000_000,   # mil/aero (US key fobs)
+    433_920_000,   # ISM (EU key fobs / weather sensors)
+    462_500_000,   # FRS / GMRS walkie-talkies
+    488_000_000,   # UHF-TV
+    617_000_000,   # 5G band 71
+    734_000_000,   # LTE 700
+    881_000_000,   # LTE 850
+    915_000_000,   # ISM (LoRa, Z-Wave US)
+    944_000_000,   # GSM 900
+    1_090_000_000, # ADS-B aircraft
+    1_227_000_000, # GPS L2
+    1_350_000_000, # cellular L-band
+    1_575_420_000, # GPS L1
+    1_602_000_000, # GLONASS
+    1_675_000_000, # weather satellite downlinks
 ]
-dwell_seconds = 5
+dwell_seconds = 1.0
 sample_rate_hz = 2048000

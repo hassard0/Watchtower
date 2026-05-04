@@ -56,9 +56,14 @@ class MidbandCfg:
     enabled: bool = True
     device_index: int = 1
     sweep_freqs_hz: list[int] = field(default_factory=lambda: [
-        734_000_000, 881_000_000, 944_000_000, 1_575_420_000,
+        # 22-band wide-band sweep — see DEFAULT_SWEEP_FREQS_HZ in scanners/midband.py
+        25_000_000, 98_000_000, 122_000_000, 146_000_000, 155_000_000,
+        162_550_000, 195_000_000, 315_000_000, 433_920_000, 462_500_000,
+        488_000_000, 617_000_000, 734_000_000, 881_000_000, 915_000_000,
+        944_000_000, 1_090_000_000, 1_227_000_000, 1_350_000_000,
+        1_575_420_000, 1_602_000_000, 1_675_000_000,
     ])
-    dwell_seconds: float = 5.0
+    dwell_seconds: float = 1.0
     sample_rate_hz: int = 2_048_000
 
 

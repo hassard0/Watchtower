@@ -59,24 +59,58 @@ def _mfr_data_to_hex(data: dict[int, bytes]) -> str | None:
 class BleScanner(Scanner):
     name = ScannerName.BLE
 
-    def __init__(self, adapter: str | None = "hci0") -> None:
+    # Deduplicate identical advertisements per (mac, content_hash) inside a window.
+    # BLE devices spam advertisements every 100-500ms; storing every one is
+    # wasteful. We keep the FIRST event per (mac, hash) per DEDUP_WINDOW_SEC,
+    # which still yields one event per ~5s per stationary device — plenty
+    # for presence tracking and visit segmentation.
+    DEDUP_WINDOW_SEC: float = 5.0
+
+    def __init__(self, adapter: str | None = "hci0", dedup_window_sec: float | None = None) -> None:
         super().__init__()
         self._adapter = adapter
+        if dedup_window_sec is not None:
+            self.DEDUP_WINDOW_SEC = dedup_window_sec
+        # last-emitted-at per (mac, content_hash); periodically GC'd.
+        self._last_emit: dict[tuple[str, int], float] = {}
+        self._last_gc: float = 0.0
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+        import time as _time
 
         def cb(device: Any, adv: Any) -> None:
             try:
+                mac = device.address
+                rssi = int(adv.rssi) if adv.rssi is not None else None
+                services = list(adv.service_uuids or [])
+                mfr_hex = _mfr_data_to_hex(adv.manufacturer_data or {})
+                local_name = adv.local_name or device.name
+                # Dedupe key: same MAC + same advertisement content.
+                # RSSI is excluded so RSSI fluctuations don't bypass dedup;
+                # we'll capture RSSI changes when the window expires.
+                content = (mac, hash((tuple(services), mfr_hex, local_name)))
+                now_ts = _time.monotonic()
+                last = self._last_emit.get(content)
+                if last is not None and (now_ts - last) < self.DEDUP_WINDOW_SEC:
+                    return  # suppress duplicate
+                self._last_emit[content] = now_ts
+                # Garbage-collect old entries every 60s.
+                if now_ts - self._last_gc > 60:
+                    cutoff = now_ts - max(60, self.DEDUP_WINDOW_SEC * 12)
+                    for k in [k for k, v in self._last_emit.items() if v < cutoff]:
+                        self._last_emit.pop(k, None)
+                    self._last_gc = now_ts
+
                 feats = Features(
-                    mac=device.address,
-                    rssi=int(adv.rssi) if adv.rssi is not None else None,
+                    mac=mac,
+                    rssi=rssi,
                     tx_power=int(adv.tx_power) if adv.tx_power is not None else None,
-                    vendor_oui=_vendor_for_oui(device.address),
-                    is_random_mac=_is_random_mac(device.address),
-                    service_uuids=list(adv.service_uuids or []),
-                    manufacturer_data_hex=_mfr_data_to_hex(adv.manufacturer_data or {}),
-                    local_name=adv.local_name or device.name,
+                    vendor_oui=_vendor_for_oui(mac),
+                    is_random_mac=_is_random_mac(mac),
+                    service_uuids=services,
+                    manufacturer_data_hex=mfr_hex,
+                    local_name=local_name,
                 )
                 ev = Event(
                     scanner=ScannerName.BLE,

@@ -308,6 +308,68 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- MORNING RECAP -->
+      <div class="glass rounded-2xl p-5" x-show="recap">
+        <div class="flex items-baseline justify-between mb-3">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500">Recap</div>
+            <div class="text-base font-semibold">Last <span x-text="recap?.window_hours || 8"></span> hours</div>
+          </div>
+          <div class="flex items-center gap-1">
+            <template x-for="h in [1, 8, 24]" :key="h">
+              <button @click="recapHours = h; loadRecap()"
+                      class="seg-btn text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-ink-600/40 text-slate-400"
+                      :data-active="recapHours === h">
+                <span x-text="h+'h'"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">New entities</div>
+            <div class="text-2xl num font-bold text-signal-glow" x-text="recap?.new_entities_count ?? 0"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Departed</div>
+            <div class="text-2xl num font-bold text-slate-300" x-text="recap?.departed_entities_count ?? 0"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Alerts fired</div>
+            <div class="text-2xl num font-bold" :class="(recap?.alerts_total ?? 0) > 0 ? 'text-signal-warm' : 'text-slate-500'" x-text="recap?.alerts_total ?? 0"></div>
+          </div>
+          <div class="bg-ink-700/40 rounded-lg p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Peak unique BLE</div>
+            <div class="text-2xl num font-bold" x-text="recap?.peak_unique_macs_5min ?? 0"></div>
+          </div>
+        </div>
+        <div x-show="(recap?.top_alerts || []).length > 0">
+          <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Top alerts in window</div>
+          <div class="space-y-1 max-h-48 overflow-y-auto scrollbar">
+            <template x-for="a in (recap?.top_alerts || [])" :key="a.alert_id">
+              <div class="flex items-center gap-2 text-xs px-2 py-1 rounded bg-ink-700/30">
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="severityChipFull(a.severity)" x-text="a.severity"></span>
+                <span class="text-slate-300 truncate flex-1" x-text="a.rule_id?.replace(/_/g,' ')"></span>
+                <span class="text-slate-500 truncate" x-text="a.friendly_name || a.entity_id"></span>
+                <span class="text-[10px] num text-slate-500" x-text="formatTime(a.ts_unix)"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div x-show="(recap?.new_entities || []).length > 0" class="mt-3">
+          <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">First-seen this window</div>
+          <div class="space-y-1 max-h-32 overflow-y-auto scrollbar">
+            <template x-for="e in (recap?.new_entities || []).slice(0, 12)" :key="e.entity_id">
+              <button @click="openEntity(e.entity_id)" class="w-full flex items-center gap-2 text-xs px-2 py-1 rounded bg-ink-700/30 hover:bg-ink-700/60 transition text-left">
+                <span class="text-slate-300 truncate flex-1" x-text="entityDisplayName(e)"></span>
+                <span class="text-[10px] num text-slate-500" x-text="(e.total_observations || 0) + ' obs'"></span>
+                <span class="text-[10px] num text-slate-500" x-text="formatTime(e.first_seen_unix)"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+
       <!-- ENTROPY / BASELINE STRIP -->
       <div class="glass rounded-2xl p-5">
         <div class="flex items-center justify-between mb-3">

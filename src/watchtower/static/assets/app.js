@@ -11,6 +11,8 @@ function watchtower() {
     settings: {},
     settingsSchema: {},
     settingsDirty: false,
+    recap: null,
+    recapHours: 8,
     entityDetail: null,
     loading: false,
     now: '',
@@ -81,6 +83,7 @@ function watchtower() {
         if (this.tab === 'spectrum')  tasks.push(this.loadSpectrum());
         if (this.tab === 'zones')     tasks.push(this.loadZones());
         if (this.tab === 'discover')  tasks.push(this.loadDiscovery());
+        if (this.tab === 'overview')  tasks.push(this.loadRecap());
         if (this.tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
         await Promise.all(tasks);
       } finally {
@@ -142,6 +145,13 @@ function watchtower() {
         const j = await r.json();
         this.discoveryCandidates = j.candidates || [];
       } catch (e) { console.warn('loadDiscovery', e); }
+    },
+
+    async loadRecap() {
+      try {
+        const r = await fetch('/api/recap?hours=' + this.recapHours);
+        this.recap = await r.json();
+      } catch (e) { console.warn('loadRecap', e); }
     },
 
     async loadSettings() {

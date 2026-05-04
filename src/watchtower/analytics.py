@@ -559,6 +559,12 @@ class Analytics:
     def _score_entities(self, conn) -> None:
         """Compute regularity + anomaly_score per entity."""
         now = int(time.time())
+        # Anchor-aware: if no anchors are enrolled at all, skip the
+        # "anchor-absent" anomaly contribution — every entity would be
+        # flagged "while away" and the dashboard would be wall-to-wall red.
+        any_anchor_enrolled = conn.execute(
+            "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
+        ).fetchone() is not None
         # Pull all entities with their visits.
         rows = conn.execute(
             """SELECT e.entity_id, e.classification, e.last_seen_unix, e.visit_count, e.avg_rssi
@@ -591,23 +597,34 @@ class Analytics:
             else:
                 regularity = 0.0
 
-            # Anomaly score (0..1):
+            # Anomaly score (0..1). WiFi APs and very-high-volume stationary BLE
+            # IoT (TVs, smart bulbs) are excluded from the linger/strong-RSSI
+            # boosts — they're infrastructure, not a threat signal.
+            is_wifi = entity_id.startswith("wifi:")
+            is_stationary_ble = visit_count >= 1 and conn.execute(
+                "SELECT total_observations FROM entities WHERE entity_id = ?",
+                (entity_id,)
+            ).fetchone()
+            stationary = is_wifi or (is_stationary_ble and is_stationary_ble[0] > 5000)
+
             anomaly = 0.0
-            # 1) Long lingering: longest visit > LINGER_THRESHOLD_SEC contributes.
+            # 1) Long lingering: longest visit > LINGER_THRESHOLD_SEC contributes —
+            # but only for non-stationary entities.
             longest = max((d for _, d, _ in visits), default=0)
-            if longest > LINGER_THRESHOLD_SEC:
+            if longest > LINGER_THRESHOLD_SEC and not stationary:
                 anomaly += 0.35 * min(1.0, (longest - LINGER_THRESHOLD_SEC) / LINGER_THRESHOLD_SEC)
             # 2) Currently lingering AND no anchor in last ANCHOR_TIMEOUT_SEC.
+            # Skip entirely if no anchors enrolled (everything would flag).
             currently_present = (now - last_seen) < 120
-            if currently_present and classification not in ("anchor", "satellite", "known_guest"):
+            if any_anchor_enrolled and currently_present and classification not in ("anchor", "satellite", "known_guest"):
                 anchor_present = conn.execute(
                     "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
                     (now - ANCHOR_TIMEOUT_SEC,),
                 ).fetchone()
                 if not anchor_present:
                     anomaly += 0.4
-            # 3) Strong RSSI (close perimeter).
-            if avg_rssi is not None and avg_rssi > -55:
+            # 3) Strong RSSI (close perimeter) — also gated on non-stationary.
+            if avg_rssi is not None and avg_rssi > -55 and not stationary:
                 anomaly += 0.15
             # 4) Erratic visit pattern (low regularity).
             anomaly += 0.10 * (1.0 - regularity)

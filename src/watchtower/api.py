@@ -92,6 +92,8 @@ class ApiServer:
         self._app.router.add_get("/api/spectrum", self.spectrum)
         # Discovery — auto-suggest enrollment candidates
         self._app.router.add_get("/api/discovery", self.discovery)
+        # Morning summary — what happened recently
+        self._app.router.add_get("/api/recap", self.recap)
         # Settings
         self._app.router.add_get("/api/settings", self.settings_get)
         self._app.router.add_post("/api/settings", self.settings_set)
@@ -710,6 +712,97 @@ class ApiServer:
             current[k] = v
         save_settings(self._db, current)
         return web.json_response({"ok": True, "settings": current})
+
+    # ---- RECAP ----
+
+    async def recap(self, request: web.Request) -> web.Response:
+        """Summary of activity over the last N hours (default 8h ≈ overnight).
+
+        Returns:
+        - new_entities: first-seen during the window
+        - departed_entities: last-seen during the window but not after (left range)
+        - alert_counts: alerts fired by severity
+        - top_alerts: high/critical alerts to surface
+        - busiest_hour: peak BLE rate hour
+        - peak_count: peak unique-MAC count in any 5min bucket
+        """
+        hours = int(request.query.get("hours", "8"))
+        window = max(1, min(168, hours)) * 3600
+        now = int(time.time())
+        since = now - window
+        with get_connection(self._db) as conn:
+            new_entities = conn.execute("""
+                SELECT entity_id, kind, friendly_name, first_seen_unix, last_seen_unix,
+                       avg_rssi, total_observations, anomaly_score
+                FROM entities
+                WHERE first_seen_unix >= ?
+                ORDER BY total_observations DESC LIMIT 30
+            """, (since,)).fetchall()
+            departed_entities = conn.execute("""
+                SELECT entity_id, kind, friendly_name, classification,
+                       first_seen_unix, last_seen_unix, total_observations
+                FROM entities
+                WHERE last_seen_unix BETWEEN ? AND ?
+                  AND last_seen_unix < ? - 600
+                ORDER BY last_seen_unix DESC LIMIT 30
+            """, (since, now, now)).fetchall()
+            alert_counts = conn.execute("""
+                SELECT severity, COUNT(*) FROM alerts WHERE ts_unix >= ? GROUP BY severity
+            """, (since,)).fetchall()
+            top_alerts = conn.execute("""
+                SELECT a.alert_id, a.ts_unix, a.rule_id, a.severity, a.entity_id,
+                       a.score, a.evidence_json, e.friendly_name, e.kind
+                FROM alerts a
+                LEFT JOIN entities e ON a.entity_id = e.entity_id
+                WHERE a.ts_unix >= ? AND a.severity IN ('high', 'critical')
+                ORDER BY a.ts_unix DESC LIMIT 20
+            """, (since,)).fetchall()
+            ble_per_5min = conn.execute("""
+                SELECT (ts_unix / 300) * 300 AS bucket, COUNT(DISTINCT json_extract(features_json, '$.mac')) AS unique_macs
+                FROM raw_events
+                WHERE scanner = 'ble_scanner' AND ts_unix >= ?
+                GROUP BY bucket
+                ORDER BY unique_macs DESC LIMIT 1
+            """, (since,)).fetchone()
+            total_events = conn.execute("""
+                SELECT COUNT(*) FROM raw_events WHERE ts_unix >= ?
+            """, (since,)).fetchone()[0]
+        new_dicts = [
+            {"entity_id": e[0], "kind": e[1], "friendly_name": e[2],
+             "first_seen_unix": e[3], "last_seen_unix": e[4],
+             "avg_rssi": e[5], "total_observations": e[6], "anomaly_score": e[7]}
+            for e in new_entities
+        ]
+        departed_dicts = [
+            {"entity_id": e[0], "kind": e[1], "friendly_name": e[2],
+             "classification": e[3],
+             "first_seen_unix": e[4], "last_seen_unix": e[5],
+             "total_observations": e[6]}
+            for e in departed_entities
+        ]
+        alert_dicts = []
+        for aid, ts, rid, sev, eid, score, ev_json, fname, kind in top_alerts:
+            alert_dicts.append({
+                "alert_id": aid, "ts_unix": ts, "rule_id": rid, "severity": sev,
+                "entity_id": eid, "score": score,
+                "evidence": json.loads(ev_json) if ev_json else {},
+                "friendly_name": fname, "kind": kind,
+            })
+        return web.json_response({
+            "window_hours": hours,
+            "since_unix": since,
+            "ts_unix": now,
+            "new_entities_count": len(new_dicts),
+            "new_entities": new_dicts,
+            "departed_entities_count": len(departed_dicts),
+            "departed_entities": departed_dicts,
+            "alert_counts": {sev: c for sev, c in alert_counts},
+            "alerts_total": sum(c for _, c in alert_counts),
+            "top_alerts": alert_dicts,
+            "peak_unique_macs_5min": ble_per_5min[1] if ble_per_5min else 0,
+            "peak_unique_macs_at_unix": ble_per_5min[0] if ble_per_5min else 0,
+            "total_events": total_events,
+        })
 
     # ---- DISCOVERY ----
 

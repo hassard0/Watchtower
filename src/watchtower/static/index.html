@@ -253,9 +253,9 @@ tailwind.config = {
             <!-- Dots -->
             <template x-for="d in radarDots" :key="d.id">
               <div class="absolute group" :style="`top:${50 + d.y}%; left:${50 + d.x}%; transform: translate(-50%,-50%);`">
-                <div class="w-2.5 h-2.5 rounded-full"
+                <div class="rounded-full transition-all"
                      :class="d.cls"
-                     :style="`box-shadow: 0 0 ${10 + d.glow*14}px ${d.shadow};`"></div>
+                     :style="`width: ${d.size}px; height: ${d.size}px; box-shadow: 0 0 ${10 + d.glow*14}px ${d.shadow};`"></div>
                 <div class="opacity-0 group-hover:opacity-100 transition absolute left-3 top-0 z-20 px-2 py-1 rounded text-[10px] whitespace-nowrap glass border border-ink-600/60">
                   <span x-text="d.label"></span>
                   <span class="text-slate-500 ml-1 num" x-text="d.rssi + 'dBm'"></span>

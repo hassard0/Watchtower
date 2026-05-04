@@ -381,8 +381,9 @@ function watchtower() {
         else if (e.classification === 'known_guest') shadow = '#7dd3fc';
         else if (e.classification === 'untrusted') shadow = '#ff5470';
         if ((e.anomaly_score || 0) >= 0.5) { cls = 'bg-threat'; shadow = '#ff5470'; }
+        const size = 6 + Math.round((1 - norm) * 12);
         return {
-          id: e.entity_id, x, y,
+          id: e.entity_id, x, y, size,
           cls,
           shadow,
           glow: Math.min(1, (e.anomaly_score || 0)),

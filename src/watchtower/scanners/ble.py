@@ -89,7 +89,11 @@ class BleScanner(Scanner):
                 # Dedupe key: same MAC + same advertisement content.
                 # RSSI is excluded so RSSI fluctuations don't bypass dedup;
                 # we'll capture RSSI changes when the window expires.
-                content = (mac, hash((tuple(services), mfr_hex, local_name)))
+                # Dedup hash uses STABLE parts only — rotating bytes (cryptographic
+                # keys in Apple Continuity, counters in some Samsung msgs) bypass
+                # dedup if included. Use vendor-id + sub-type only (first 6 hex chars).
+                mfr_stable = mfr_hex[:6] if mfr_hex else ""
+                content = (mac, hash((tuple(services), mfr_stable, local_name)))
                 now_ts = _time.monotonic()
                 last = self._last_emit.get(content)
                 if last is not None and (now_ts - last) < self.DEDUP_WINDOW_SEC:

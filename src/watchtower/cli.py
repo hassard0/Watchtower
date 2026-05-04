@@ -11,6 +11,7 @@ import click
 from watchtower.active_probe import GattProber
 from watchtower.analytics import Analytics, load_settings
 from watchtower.api import ApiServer
+from watchtower.honeypot import Honeypot
 from watchtower.bus import Bus
 from watchtower.config import load_config
 from watchtower.logging_setup import setup_logging
@@ -116,6 +117,15 @@ async def _run_async(config_path: Path) -> None:
     )
     prober_task = asyncio.create_task(gatt_prober.run(stop))
 
+    # BLE lure honeypot — toggle-able via settings.honeypot_enabled.
+    def _hp_enabled():
+        return bool(load_settings(cfg.storage.db_path).get("honeypot_enabled"))
+    def _hp_rotate_min():
+        return float(load_settings(cfg.storage.db_path).get("honeypot_rotate_minutes") or 30)
+    honeypot = Honeypot(cfg.storage.db_path, enabled_check=_hp_enabled,
+                        rotate_minutes_check=_hp_rotate_min)
+    honeypot_task = asyncio.create_task(honeypot.run(stop))
+
     api = ApiServer(cfg.storage.db_path, host="0.0.0.0", port=8080)
     api.set_pause_scanner_factory(pause_factory)
     await api.start()
@@ -126,7 +136,7 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
-    for t in (pruner_task, analytics_task, prober_task):
+    for t in (pruner_task, analytics_task, prober_task, honeypot_task):
         t.cancel()
         try:
             await t

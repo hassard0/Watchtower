@@ -291,6 +291,18 @@ class ApiServer:
             baseline_progress = conn.execute(
                 "SELECT COUNT(DISTINCT (feature || ':' || hour_of_week)) AS buckets, COUNT(DISTINCT feature) AS features FROM baseline_stats"
             ).fetchone()
+            hp_row = conn.execute(
+                "SELECT value, updated_unix FROM analytics_state WHERE key = 'honeypot_active_lure'"
+            ).fetchone()
+            honeypot_active = None
+            if hp_row and hp_row[0]:
+                try:
+                    hpd = json.loads(hp_row[0])
+                    hpd["set_at_unix"] = hpd.get("set_at_unix") or hp_row[1]
+                    honeypot_active = hpd
+                except Exception:  # noqa: BLE001
+                    pass
+            settings = load_settings(self._db)
 
         if not any_anchor:
             home_state = "unknown"
@@ -318,6 +330,11 @@ class ApiServer:
                 "features": baseline_progress[1] or 0,
                 "max_buckets": (baseline_progress[1] or 0) * 168,
             },
+            "honeypot": {
+                "enabled": bool(settings.get("honeypot_enabled")),
+                "active_lure": honeypot_active,
+            },
+            "active_probing_enabled": bool(settings.get("active_probing_enabled")),
         })
 
     async def entities(self, request: web.Request) -> web.Response:

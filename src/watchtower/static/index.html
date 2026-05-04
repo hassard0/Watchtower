@@ -113,6 +113,12 @@ tailwind.config = {
         <div class="w-1.5 h-1.5 rounded-full bg-signal-pulse animate-pulse"></div>
         <span class="text-xs num text-slate-300" x-text="state.entities?.active_now + ' active'"></span>
       </div>
+      <div x-show="state.honeypot?.enabled && state.honeypot?.active_lure"
+           class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-threat/15 border border-threat/40"
+           :title="'Pi is broadcasting as: ' + (state.honeypot?.active_lure?.name || '')">
+        <span class="text-sm">🪤</span>
+        <span class="text-xs num text-threat truncate max-w-[180px]" x-text="state.honeypot?.active_lure?.name || ''"></span>
+      </div>
       <button @click="tab='alerts'" class="relative px-3 py-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-threat/40 transition">
         <svg class="w-4 h-4 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
         <span class="text-xs num ml-1" x-text="state.alerts_unack_24h"></span>

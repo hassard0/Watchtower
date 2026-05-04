@@ -809,6 +809,17 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- EXPORT -->
+      <div class="glass rounded-2xl p-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Data export</div>
+        <div class="flex flex-wrap gap-2">
+          <a download href="/api/export/entities.csv" class="text-xs px-3 py-2 rounded border border-ink-600 text-slate-300 hover:border-signal-glow/40 hover:text-signal-glow">↓ entities.csv</a>
+          <a download href="/api/export/alerts.csv" class="text-xs px-3 py-2 rounded border border-ink-600 text-slate-300 hover:border-signal-glow/40 hover:text-signal-glow">↓ alerts.csv</a>
+          <a download href="/api/export/visits.csv" class="text-xs px-3 py-2 rounded border border-ink-600 text-slate-300 hover:border-signal-glow/40 hover:text-signal-glow">↓ visits.csv</a>
+        </div>
+        <div class="text-[10px] text-slate-600 mt-2">Download the SQLite tables as CSV for offline analysis. raw_events is intentionally NOT exported (potentially huge).</div>
+      </div>
+
       <!-- DANGER ZONE -->
       <div class="glass rounded-2xl p-5 border border-threat/20">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Database tools</div>

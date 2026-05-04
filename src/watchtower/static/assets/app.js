@@ -61,14 +61,15 @@ function watchtower() {
 
     // ---- INIT ----
     init() {
-      this.refresh().then(() => {
-        // First-run: if there are no anchors, auto-route to Discover so the user
-        // lands directly on enrollment.
-        if (this.state.any_anchor_enrolled === false && this.tab === 'overview') {
-          // Keep Overview but flag the SETUP nudge (already there). Could also
-          // auto-switch — leaving on Overview so the user sees the situation.
-        }
+      // Restore last-used tab from localStorage.
+      try {
+        const saved = localStorage.getItem('watchtower.tab');
+        if (saved && this.tabs.find(t => t.id === saved)) this.tab = saved;
+      } catch (e) {}
+      this.$watch('tab', v => {
+        try { localStorage.setItem('watchtower.tab', v); } catch (e) {}
       });
+      this.refresh();
       setInterval(() => { this.tick(); }, 1000);
       setInterval(() => { this.refresh(); }, 5000);
     },

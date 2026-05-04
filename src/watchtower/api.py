@@ -100,6 +100,10 @@ class ApiServer:
         # Admin / database tools
         self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
         self._app.router.add_post("/api/alerts/ack-all", self.alerts_ack_all)
+        # CSV exports
+        self._app.router.add_get("/api/export/entities.csv", self.export_entities_csv)
+        self._app.router.add_get("/api/export/alerts.csv", self.export_alerts_csv)
+        self._app.router.add_get("/api/export/visits.csv", self.export_visits_csv)
         # Static dashboard
         self._app.router.add_get("/", self.index)
         self._app.router.add_get("/probe", self.probe_page)
@@ -676,6 +680,61 @@ class ApiServer:
             "midband_samples": samples,
             "subghz_decodes": subghz_decodes,
         })
+
+    # ---- CSV EXPORTS ----
+
+    def _csv_response(self, rows, headers):
+        import csv, io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(headers)
+        for r in rows:
+            w.writerow(r)
+        return web.Response(
+            text=buf.getvalue(),
+            content_type="text/csv",
+            headers={"Content-Disposition": "attachment"},
+        )
+
+    async def export_entities_csv(self, request: web.Request) -> web.Response:
+        with get_connection(self._db) as conn:
+            rows = conn.execute("""
+                SELECT entity_id, scanner, kind, friendly_name, classification,
+                       first_seen_unix, last_seen_unix, visit_count, total_observations,
+                       avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
+                       vendor, is_random_mac
+                FROM entities ORDER BY last_seen_unix DESC
+            """).fetchall()
+        return self._csv_response(rows, [
+            "entity_id","scanner","kind","friendly_name","classification",
+            "first_seen_unix","last_seen_unix","visit_count","total_observations",
+            "avg_rssi","min_rssi","max_rssi","regularity","anomaly_score",
+            "vendor","is_random_mac",
+        ])
+
+    async def export_alerts_csv(self, request: web.Request) -> web.Response:
+        with get_connection(self._db) as conn:
+            rows = conn.execute("""
+                SELECT alert_id, ts_unix, rule_id, severity, entity_id, score,
+                       home_state, evidence_json, acknowledged, user_feedback
+                FROM alerts ORDER BY ts_unix DESC
+            """).fetchall()
+        return self._csv_response(rows, [
+            "alert_id","ts_unix","rule_id","severity","entity_id","score",
+            "home_state","evidence_json","acknowledged","user_feedback",
+        ])
+
+    async def export_visits_csv(self, request: web.Request) -> web.Response:
+        with get_connection(self._db) as conn:
+            rows = conn.execute("""
+                SELECT visit_id, entity_id, start_unix, end_unix, duration_sec,
+                       observation_count, avg_rssi, max_rssi
+                FROM entity_visits ORDER BY start_unix DESC
+            """).fetchall()
+        return self._csv_response(rows, [
+            "visit_id","entity_id","start_unix","end_unix","duration_sec",
+            "observation_count","avg_rssi","max_rssi",
+        ])
 
     # ---- ADMIN ----
 

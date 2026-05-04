@@ -1,7 +1,12 @@
 [Unit]
 Description=Watchtower RF perimeter awareness daemon
-After=network-online.target bluetooth.service
-Wants=network-online.target
+After=network-online.target bluetooth.service NetworkManager.service
+Wants=network-online.target bluetooth.service NetworkManager.service
+# If the bluetooth daemon dies, restart watchtower along with it so the BLE scanner can re-attach.
+PartOf=bluetooth.service
+# Hard-cap restart loops: at most 10 restarts in 5 minutes; if it can't stay up, halt.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -11,6 +16,9 @@ WorkingDirectory=/opt/watchtower
 ExecStart=/opt/watchtower/.venv/bin/watchtower run --config /etc/watchtower/watchtower.toml
 Restart=on-failure
 RestartSec=5
+# After a longer outage (boot too early, etc.), wait up to 60s for bluetoothd to settle.
+TimeoutStartSec=60s
+TimeoutStopSec=30s
 StandardOutput=append:/var/log/watchtower/watchtower.log
 StandardError=append:/var/log/watchtower/watchtower.err
 

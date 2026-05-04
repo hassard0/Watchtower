@@ -12,7 +12,11 @@ sudo apt-get install -y --no-install-recommends \
   rtl-sdr librtlsdr-dev rtl-433 \
   sqlite3 \
   build-essential pkg-config \
-  rsync git curl
+  rsync git curl iw
+
+echo "[+] Ensuring core services are enabled at boot..."
+# bluetooth + NetworkManager are dependencies of watchtower.service.
+sudo systemctl enable bluetooth.service NetworkManager.service ssh.service 2>&1 | tail -3 || true
 
 echo "[+] Adding 'admin' to bluetooth group (requires re-login to take effect)..."
 sudo usermod -aG bluetooth admin || true
@@ -35,5 +39,24 @@ echo "[+] Creating /var/lib/watchtower and /etc/watchtower owned by admin..."
 sudo install -d -o admin -g admin -m 0755 /var/lib/watchtower
 sudo install -d -o admin -g admin -m 0755 /etc/watchtower
 sudo install -d -o admin -g admin -m 0755 /var/log/watchtower
+
+echo "[+] Adding /usr/sbin and ~/.local/bin to admin's interactive PATH..."
+# `iw` lives in /usr/sbin which Debian doesn't put on non-root users' PATH by default;
+# `uv` is installed at ~/.local/bin via the astral installer.
+sudo tee /etc/profile.d/watchtower-admin-path.sh >/dev/null <<'EOF'
+# Watchtower: ensure admin has iw + uv on interactive PATH
+if [ "$(id -un)" = "admin" ]; then
+    case ":$PATH:" in
+        *":/usr/sbin:"*) :;;
+        *) PATH="/usr/sbin:$PATH";;
+    esac
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) :;;
+        *) PATH="$HOME/.local/bin:$PATH";;
+    esac
+    export PATH
+fi
+EOF
+sudo chmod 0644 /etc/profile.d/watchtower-admin-path.sh
 
 echo "[+] Done. Verify with: rtl_test -t (must reload modules / reboot if blacklist was new)"

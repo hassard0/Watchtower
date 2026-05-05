@@ -509,6 +509,37 @@ class Analytics:
             except Exception:  # noqa: BLE001
                 log.exception("findmy: cluster inference failed")
 
+            # IEEE OUI DB refresh + vendor backfill on entities missing vendor.
+            try:
+                from watchtower.oui import maybe_refresh, vendor_for_mac
+                maybe_refresh()  # no-op unless ~30 days have passed
+                # Backfill vendor for stable-MAC entities that don't have one yet.
+                # Cheap query — limit to a handful per cycle.
+                rows_to_fix = conn.execute("""
+                    SELECT entity_id FROM entities
+                    WHERE entity_id LIKE 'ble:mac:%' AND vendor IS NULL
+                       AND last_seen_unix > strftime('%s','now') - 86400
+                    LIMIT 25
+                """).fetchall()
+                for (eid,) in rows_to_fix:
+                    mac = eid[len("ble:mac:"):]
+                    v = vendor_for_mac(mac)
+                    if v:
+                        conn.execute("UPDATE entities SET vendor = ? WHERE entity_id = ?", (v, eid))
+                rows_to_fix = conn.execute("""
+                    SELECT entity_id FROM entities
+                    WHERE entity_id LIKE 'wifi:mac:%' AND vendor IS NULL
+                       AND last_seen_unix > strftime('%s','now') - 86400
+                    LIMIT 25
+                """).fetchall()
+                for (eid,) in rows_to_fix:
+                    mac = eid[len("wifi:mac:"):]
+                    v = vendor_for_mac(mac)
+                    if v:
+                        conn.execute("UPDATE entities SET vendor = ? WHERE entity_id = ?", (v, eid))
+            except Exception:  # noqa: BLE001
+                log.exception("oui: maintenance failed")
+
             # Refresh owned-tracker catalogs every ~4 hours.
             try:
                 from watchtower.findmy_owned import regenerate_all_catalogs, CATALOG_REFRESH_SEC

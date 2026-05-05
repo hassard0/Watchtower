@@ -123,6 +123,7 @@ class WifiScanner(Scanner):
                     await self._wait_or_stop(self._interval)
                     continue
                 aps = _parse_iw_scan(stdout.decode("utf-8", errors="replace"))
+                from watchtower.oui import vendor_for_mac
                 for ap in aps:
                     feats = Features(
                         mac=ap.get("bssid"),
@@ -130,6 +131,7 @@ class WifiScanner(Scanner):
                         is_random_mac=_is_random_bssid(ap["bssid"]) if ap.get("bssid") else None,
                         local_name=ap.get("ssid"),
                         frequency_hz=ap.get("freq") and ap["freq"] * 1_000_000,
+                        vendor_oui=vendor_for_mac(ap.get("bssid") or ""),
                     )
                     feats.decoded = {
                         "ssid": ap.get("ssid"),

@@ -81,7 +81,11 @@ def test_ble_is_random_mac_detection():
 
 def test_ble_vendor_oui_lookup():
     from watchtower.scanners.ble import _vendor_for_oui
-    # OUI list is small and we don't depend on it being exhaustive in M1;
-    # just confirm the function returns None for unknown without raising.
-    assert _vendor_for_oui("00:00:00") in (None, "Xerox")  # 00:00:00 historically Xerox
+    # We now query the full IEEE OUI database (~50k entries) via mac-vendor-lookup
+    # with a small seed-table fallback. Vendor strings come from IEEE so we just
+    # smoke-test the shape (returns a non-empty string for known prefixes, None
+    # for malformed input, no exceptions).
+    v = _vendor_for_oui("00:00:00")
+    assert v is None or (isinstance(v, str) and "xerox" in v.lower())
     assert _vendor_for_oui("zz:zz:zz") is None
+    assert _vendor_for_oui("") is None

@@ -26,9 +26,10 @@ def _is_random_mac(mac: str) -> bool:
     return bool(first & 0x02)
 
 
-# Minimal vendor OUI table for v1 (top consumer brands).
-# Full IEEE OUI registry will be downloaded at install time in a future task.
-_OUI: dict[str, str] = {
+# Minimal seed table covering well-known historical OUIs. The full IEEE OUI
+# database (~50k entries) is loaded via watchtower.oui.vendor_for_mac() — we
+# fall back to this seed table if that lookup misses (e.g., older bundled DB).
+_OUI_SEED: dict[str, str] = {
     "00:00:00": "Xerox",
     "ac:de:48": "Apple",
     "f4:5c:89": "Apple",
@@ -41,9 +42,20 @@ _OUI: dict[str, str] = {
 
 
 def _vendor_for_oui(mac: str) -> str | None:
-    if not mac or len(mac) < 8:
+    if not mac:
         return None
-    return _OUI.get(mac[:8].lower())
+    # Try the full IEEE OUI database first.
+    try:
+        from watchtower.oui import vendor_for_mac
+        v = vendor_for_mac(mac)
+        if v:
+            return v
+    except Exception:  # noqa: BLE001
+        pass
+    # Fall back to the small seed table.
+    if len(mac) < 8:
+        return None
+    return _OUI_SEED.get(mac[:8].lower())
 
 
 def _mfr_data_to_hex(data: dict[int, bytes]) -> str | None:

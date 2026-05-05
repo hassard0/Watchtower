@@ -300,6 +300,18 @@ class ApiServer:
         now = int(time.time())
         db_path = self._db
 
+        # /api/state is the heaviest poll target — fired every 5 s by the
+        # dashboard for the Scanners panel + Home state header. Cache the
+        # whole DB block for 4 s so consecutive polls share work, but not
+        # so long that anomaly counts feel stale.
+        cache_hit = _query_cache.get("state_db_block")
+        if cache_hit and (time.time() - cache_hit[0]) < 4.0:
+            cached_result = cache_hit[1]
+            (scanner_data, entity_summary, anchor_present, any_anchor,
+             unack_alerts, baseline_progress, honeypot_active, settings) = cached_result
+        else:
+            cached_result = None
+
         def _query():
             with get_connection(db_path) as conn:
                 scanners = conn.execute("""
@@ -378,8 +390,13 @@ class ApiServer:
             return (scanner_data, entity_summary, anchor_present, any_anchor,
                     unack_alerts, baseline_progress, honeypot_active, settings)
 
-        (scanner_data, entity_summary, anchor_present, any_anchor,
-         unack_alerts, baseline_progress, honeypot_active, settings) = await _offload(_query)
+        if cached_result is None:
+            (scanner_data, entity_summary, anchor_present, any_anchor,
+             unack_alerts, baseline_progress, honeypot_active, settings) = await _offload(_query)
+            _query_cache["state_db_block"] = (time.time(), (
+                scanner_data, entity_summary, anchor_present, any_anchor,
+                unack_alerts, baseline_progress, honeypot_active, settings,
+            ))
 
         if not any_anchor:
             home_state = "unknown"
@@ -1086,23 +1103,32 @@ class ApiServer:
         db_path = self._db
 
         def _query_observers():
+            # Rotating-MAC aggregation over last `window` seconds. With ~3300
+            # ble_scanner rows in a 5-min window and a json_extract per row,
+            # this costs ~500 ms — too expensive to repeat on every dashboard
+            # poll. Result only changes by a handful of MACs every 30 s, so
+            # cache it briefly.
+            rows_cache_key = f"findmy_observers_rows_{window}"
+            def _compute_rows():
+                with get_connection(db_path) as conn:
+                    return conn.execute("""
+                        SELECT lower(json_extract(features_json, '$.mac')) AS mac,
+                               MAX(json_extract(features_json, '$.manufacturer_data_hex')) AS mfr,
+                               MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS max_rssi,
+                               AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
+                               MIN(ts_unix) AS first_seen,
+                               MAX(ts_unix) AS last_seen,
+                               COUNT(*) AS sightings
+                        FROM raw_events
+                        WHERE scanner = 'ble_scanner'
+                          AND ts_unix > ?
+                          AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                        GROUP BY mac
+                        ORDER BY max_rssi DESC NULLS LAST
+                        LIMIT 100
+                    """, (now - window,)).fetchall()
+            rows = _cached(rows_cache_key, 30.0, _compute_rows)
             with get_connection(db_path) as conn:
-                rows = conn.execute("""
-                    SELECT lower(json_extract(features_json, '$.mac')) AS mac,
-                           MAX(json_extract(features_json, '$.manufacturer_data_hex')) AS mfr,
-                           MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS max_rssi,
-                           AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
-                           MIN(ts_unix) AS first_seen,
-                           MAX(ts_unix) AS last_seen,
-                           COUNT(*) AS sightings
-                    FROM raw_events
-                    WHERE scanner = 'ble_scanner'
-                      AND ts_unix > ?
-                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                    GROUP BY mac
-                    ORDER BY max_rssi DESC NULLS LAST
-                    LIMIT 100
-                """, (now - window,)).fetchall()
                 # Daily-presence aggregate is the slow part — keep it cached.
                 def _compute_daily_presence_inner():
                     day_rows = conn.execute("""

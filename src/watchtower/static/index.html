@@ -512,6 +512,7 @@ tailwind.config = {
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-medium" x-text="entityDisplayName(c)"></span>
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="sourceBadgeClass(c.scanner)" x-text="sourceLabel(c)"></span>
                 <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(c.kind)" x-text="c.kind?.replace(/_/g,' ')"></span>
                 <span x-show="c.on_home_wifi" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/20 text-signal-glow border border-signal-glow/40">on home wi-fi</span>
                 <span x-show="discoveryProbed[c.entity_id]?.ok" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-pulse/20 text-signal-pulse border border-signal-pulse/40">✓ named</span>
@@ -1036,8 +1037,9 @@ tailwind.config = {
                       <div class="w-2 h-2 rounded-full flex-shrink-0"
                            :class="e.currently_present ? 'bg-signal-pulse animate-pulse' : 'bg-slate-700'"></div>
                       <div class="min-w-0">
-                        <div class="font-medium truncate flex items-center gap-1.5">
+                        <div class="font-medium truncate flex items-center gap-1.5 flex-wrap">
                           <span x-text="entityDisplayName(e)"></span>
+                          <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="sourceBadgeClass(e.scanner)" x-text="sourceLabel(e)"></span>
                           <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded" :class="kindBadgeClass(e.kind)" x-text="e.kind?.replace(/_/g,' ')"></span>
                           <span x-show="e.vendor" class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-deep/15 text-signal-deep" x-text="e.vendor"></span>
                         </div>

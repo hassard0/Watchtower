@@ -928,6 +928,36 @@ function watchtower() {
       if (k.includes('keyfob')) return 'bg-signal-warm/15 text-signal-warm';
       if (k.includes('garage')) return 'bg-signal-warm/15 text-signal-warm';
       if (k.includes('findmy')) return 'bg-signal-deep/20 text-purple-300';
+      if (k.includes('wifi')) return 'bg-signal-deep/15 text-signal-deep';
+      return 'bg-slate-700/40 text-slate-400';
+    },
+    // "Where we heard this entity" — explicit source antenna + freq band so
+    // a Samsung TV picked up via BLE doesn't look like it was found via Wi-Fi.
+    sourceLabel(e) {
+      if (!e) return '';
+      const s = e.scanner || '';
+      if (s === 'ble_scanner') return 'BLE 2.4 GHz';
+      if (s === 'wifi_scanner') {
+        const f = (e.frequency_hz || 0) / 1e6;
+        if (f >= 5000) return 'Wi-Fi 5 GHz';
+        if (f > 0) return 'Wi-Fi 2.4 GHz';
+        return 'Wi-Fi';
+      }
+      if (s === 'subghz_scanner') {
+        const f = (e.frequency_hz || 0) / 1e6;
+        return f > 0 ? `Sub-GHz ${f.toFixed(1)} MHz` : 'Sub-GHz';
+      }
+      if (s === 'midband_scanner') {
+        const f = (e.frequency_hz || 0) / 1e6;
+        return f > 0 ? `RF ${f.toFixed(0)} MHz` : 'Mid-band';
+      }
+      return s.replace('_scanner', '');
+    },
+    sourceBadgeClass(scanner) {
+      if (scanner === 'ble_scanner') return 'bg-signal-glow/15 text-signal-glow';
+      if (scanner === 'wifi_scanner') return 'bg-signal-deep/15 text-signal-deep';
+      if (scanner === 'subghz_scanner') return 'bg-signal-warm/15 text-signal-warm';
+      if (scanner === 'midband_scanner') return 'bg-signal-pulse/15 text-signal-pulse';
       return 'bg-slate-700/40 text-slate-400';
     },
     visitColor(v) {

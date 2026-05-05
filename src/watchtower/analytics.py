@@ -515,15 +515,18 @@ class Analytics:
             # Compute regularity + anomaly scores for ALL entities (cheap).
             self._score_entities(conn)
 
-            # Recompute Find-My cluster co-presence inference once a minute or
-            # so. It's a moderately expensive query so we throttle.
+            # Recompute Find-My cluster co-presence inference periodically.
+            # Each run scans 1 day of ble_scanner events with json_extract per
+            # row, so even at the optimized cost it's the slowest query in the
+            # pipeline. Run every 10 min — co-presence labels for "is this
+            # AirTag near our anchor" don't change faster than that anyway.
             try:
                 from watchtower.findmy_clusters import update_cluster_inferences, prune_old_clusters
                 state_row = conn.execute(
                     "SELECT updated_unix FROM analytics_state WHERE key = 'findmy_inference_last_run'"
                 ).fetchone()
                 last_run = state_row[0] if state_row else 0
-                if (now - last_run) > 60:
+                if (now - last_run) > 600:
                     update_cluster_inferences(conn)
                     prune_old_clusters(conn)
                     conn.execute(

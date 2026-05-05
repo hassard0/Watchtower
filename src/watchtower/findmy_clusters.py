@@ -45,7 +45,13 @@ CLUSTER_PRUNE_AGE_SEC = 7 * 86400  # forget clusters not seen in a week
 
 # Co-presence inference.
 COPRESENCE_BUCKET_SEC = 300      # 5-minute presence buckets
-COPRESENCE_LOOKBACK_SEC = 4 * 86400  # 4 days of history
+# Lookback was 4 days, but each cluster's score query then had to scan ~4 days
+# of ble_scanner events with json_extract per row. With 90 clusters that's
+# 90 * (4 days of events) per inference run, which made the analytics step
+# take 5+ minutes — analytics fell ~5 min behind reality and the dashboard's
+# "active" filter (last 120 s) caught nothing. 1-day lookback still gives
+# stable Jaccard scores for "is this tracker the user's" and runs ~4x faster.
+COPRESENCE_LOOKBACK_SEC = 86400  # 1 day of history
 COPRESENCE_MIN_BUCKETS = 12      # need at least 12 buckets (~1 hr) of tracker presence to score
 COPRESENCE_THRESHOLD = 0.55      # Jaccard similarity ≥ 0.55 to label as owned
 
@@ -196,10 +202,17 @@ def _jaccard(a: set, b: set) -> float:
     return inter / union if union else 0.0
 
 
-def score_cluster_copresence(conn, cluster_id: str) -> tuple[str | None, float]:
+def score_cluster_copresence(conn, cluster_id: str,
+                              anchor_buckets_cache: dict | None = None
+                              ) -> tuple[str | None, float]:
     """Compute the strongest anchor co-presence for a cluster.
 
     Returns (best_anchor_entity_id_or_None, best_jaccard_score).
+
+    `anchor_buckets_cache` lets the caller (update_cluster_inferences) compute
+    each anchor's presence-bucket set once and reuse it across all clusters.
+    Without that cache the same anchor query ran ~90x per inference, which
+    was the dominant cost of the analytics step.
     """
     now = _now()
     since = now - COPRESENCE_LOOKBACK_SEC
@@ -225,14 +238,27 @@ def score_cluster_copresence(conn, cluster_id: str) -> tuple[str | None, float]:
     if len(cluster_buckets) < COPRESENCE_MIN_BUCKETS:
         return None, 0.0
 
-    # For each enrolled anchor entity, get its presence buckets.
+    # Anchor buckets — use the caller's cache if provided, else recompute.
+    if anchor_buckets_cache is None:
+        anchor_buckets_cache = _build_anchor_buckets_cache(conn)
+
+    best_anchor, best_score = None, 0.0
+    for anchor_eid, anchor_buckets in anchor_buckets_cache.items():
+        score = _jaccard(cluster_buckets, anchor_buckets)
+        if score > best_score:
+            best_score, best_anchor = score, anchor_eid
+
+    return best_anchor, best_score
+
+
+def _build_anchor_buckets_cache(conn) -> dict[str, set[int]]:
+    """Compute presence-bucket sets for every classified anchor, once."""
+    since = _now() - COPRESENCE_LOOKBACK_SEC
     anchors = conn.execute(
         "SELECT entity_id FROM entities WHERE classification = 'anchor'"
     ).fetchall()
-    best_anchor, best_score = None, 0.0
+    out: dict[str, set[int]] = {}
     for (anchor_eid,) in anchors:
-        # Translate anchor entity_id back to a query — for ble:mac:X, find raw_events with that MAC.
-        # For ble:named:X or ble:apple:X, find raw_events whose features match.
         anchor_macs = _anchor_macs(conn, anchor_eid)
         if not anchor_macs:
             continue
@@ -245,12 +271,8 @@ def score_cluster_copresence(conn, cluster_id: str) -> tuple[str | None, float]:
                   AND lower(json_extract(features_json, '$.mac')) IN ({ph})""",
             (since, *anchor_macs),
         ).fetchall()
-        anchor_buckets = _bucket_set(rows, COPRESENCE_BUCKET_SEC)
-        score = _jaccard(cluster_buckets, anchor_buckets)
-        if score > best_score:
-            best_score, best_anchor = score, anchor_eid
-
-    return best_anchor, best_score
+        out[anchor_eid] = _bucket_set(rows, COPRESENCE_BUCKET_SEC)
+    return out
 
 
 def _anchor_macs(conn, entity_id: str) -> list[str]:
@@ -296,9 +318,13 @@ def update_cluster_inferences(conn) -> int:
         "SELECT cluster_id FROM findmy_clusters WHERE last_seen_unix > ?",
         (now - 24 * 3600,),
     ).fetchall()
+    # Build the anchor presence cache once for the whole batch, not once per
+    # cluster. Anchor list and their MAC histories don't change between
+    # clusters in the same run.
+    anchor_buckets_cache = _build_anchor_buckets_cache(conn)
     n = 0
     for (cluster_id,) in active_rows:
-        anchor, score = score_cluster_copresence(conn, cluster_id)
+        anchor, score = score_cluster_copresence(conn, cluster_id, anchor_buckets_cache)
         if score >= COPRESENCE_THRESHOLD:
             conn.execute(
                 """UPDATE findmy_clusters SET

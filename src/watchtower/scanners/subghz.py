@@ -66,7 +66,15 @@ class SubGhzScanner(Scanner):
     ) -> None:
         super().__init__()
         # rtl_433 25.02 deprecated -G; passing it causes immediate exit. Use default protocol set.
-        self._args = rtl_433_args or ["-F", "json", "-d", str(device_index)]
+        # -M time:utc:usec emits a status event every received packet so a
+        # totally-quiet RF environment is distinguishable from a broken tuner.
+        # -v gives one extra diagnostic line per minute.
+        self._args = rtl_433_args or [
+            "-F", "json",
+            "-d", str(device_index),
+            "-M", "stats:1:60",  # JSON stats record every 60s
+            "-M", "level",       # include signal level in records
+        ]
 
     async def run(self) -> None:
         cmd = ["rtl_433", *self._args]
@@ -76,20 +84,56 @@ class SubGhzScanner(Scanner):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # Drain stderr concurrently so a chatty rtl_433 (or one warning about
+        # the tuner / sample rate / decoder pruning) can't fill the pipe and
+        # block the producer. Surface anything non-empty so failures are
+        # visible without needing to attach to /proc/PID/fd/2.
+        async def _drain_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                chunk = await proc.stderr.readline()
+                if not chunk:
+                    return
+                msg = chunk.decode("utf-8", errors="replace").rstrip()
+                if msg:
+                    log.warning("subghz[rtl_433]: %s", msg)
+        stderr_task = asyncio.create_task(_drain_stderr())
+
         try:
             assert proc.stdout is not None
+            decoded_count = 0
+            last_heartbeat = asyncio.get_event_loop().time()
+            HEARTBEAT_SEC = 300  # log activity every 5 minutes
             while not self._stop_event.is_set():
                 line_bytes = await proc.stdout.readline()
                 if not line_bytes:
-                    log.warning("subghz: rtl_433 stdout closed")
+                    log.warning("subghz: rtl_433 stdout closed (decoded=%d)", decoded_count)
                     break
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 ev = _line_to_event(line)
                 if ev is not None:
+                    decoded_count += 1
                     await self._emit(ev)
+                else:
+                    # Non-event JSON lines are rtl_433's status records (model
+                    # absent). Surface them as heartbeats so a quiet RF
+                    # environment vs a broken tuner is distinguishable.
+                    try:
+                        d = json.loads(line)
+                        if isinstance(d, dict) and "model" not in d:
+                            log.info("subghz[heartbeat]: %s",
+                                     {k: v for k, v in d.items() if k in ("time", "frames", "fsk", "ook", "since", "noise", "events")} or d)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat > HEARTBEAT_SEC:
+                    log.info("subghz: alive — decoded=%d in last %ds", decoded_count, HEARTBEAT_SEC)
+                    decoded_count = 0
+                    last_heartbeat = now
         finally:
+            stderr_task.cancel()
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=2.0)

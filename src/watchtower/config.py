@@ -48,7 +48,11 @@ class SubGhzCfg:
     device_index: int = 0
     center_freq_hz: int = 433_920_000
     sample_rate_hz: int = 2_048_000
-    rtl_433_args: list[str] = field(default_factory=lambda: ["-F", "json", "-d", "0"])
+    rtl_433_args: list[str] = field(default_factory=lambda: [
+        "-F", "json", "-d", "0",
+        "-M", "stats:1:60",  # periodic stats record so a quiet RF environment is distinguishable from a stuck tuner
+        "-M", "level",       # signal level on every event
+    ])
 
 
 @dataclass

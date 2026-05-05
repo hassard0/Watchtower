@@ -7,6 +7,7 @@ right now" signal that the detection layer baselines for anomaly detection.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -75,39 +76,32 @@ _BAND_LABELS: list[tuple[int, int, str, EventKind]] = [
 ]
 
 
-# Default wide-band sweep: representative center frequencies covering the
-# allocations a residential intrusion-monitor cares about. Skips 1100-1250
-# MHz where the E4000 tuner has a PLL gap; scanner also auto-skips bad
-# frequencies at runtime (5 min cooldown). At ~1s dwell each, full cycle
-# is ~27 s.
+# Default sweep: sub-GHz dense. Each security-relevant freq is listed
+# *twice* and the wider context bands once, so with the configured
+# ~0.5s dwell each sub-GHz freq is revisited every ~3s — about 3x the
+# coverage a flat 26-freq sweep gives. Skips 1100-1250 MHz where the
+# E4000 tuner has a PLL gap; scanner also auto-skips bad freqs at runtime.
 DEFAULT_SWEEP_FREQS_HZ: list[int] = [
-    25_000_000,
-    98_000_000,
-    122_000_000,
-    146_000_000,
-    155_000_000,
-    162_550_000,
-    195_000_000,
-    303_825_000,    # Honda/Acura keyfobs
-    315_000_000,
-    345_000_000,    # TPMS sensors
-    390_000_000,    # Liftmaster/Chamberlain/Genie garage doors
-    418_000_000,    # legacy EU keyfobs
-    433_920_000,
-    462_500_000,
-    488_000_000,
-    617_000_000,
-    734_000_000,
-    868_350_000,    # EU LoRa / Z-Wave EU centre
-    881_000_000,
-    915_000_000,    # US LoRa / Z-Wave US (908.42 falls in this dwell)
-    944_000_000,
-    1_090_000_000,
+    # Pass 1 — sub-GHz priority
+    303_825_000,    # Honda/Acura/Toyota keyfobs
+    315_000_000,    # US keyfobs / TPMS / Liftmaster Security+ 2.0
+    318_000_000,    # some Genie / Chamberlain / Faraday Future
+    345_000_000,    # TPMS sensors / some EU keyfobs
+    390_000_000,    # Liftmaster Security+ / older garage doors
+    418_000_000,    # legacy EU keyfobs (older BMW/Mercedes)
+    433_920_000,    # ISM (weather, doorbell, generic keyfob)
+    462_500_000,    # FRS / GMRS walkie-talkies
+    868_350_000,    # EU LoRa / Z-Wave EU
+    915_000_000,    # US LoRa / Z-Wave US (908.42 covered)
+    # Pass 2 — sub-GHz priority repeated for ~3 s revisit
+    303_825_000, 315_000_000, 318_000_000, 345_000_000, 390_000_000,
+    418_000_000, 433_920_000, 462_500_000, 868_350_000, 915_000_000,
+    # Wide-band context — visited once per outer cycle
+    25_000_000, 98_000_000, 122_000_000, 146_000_000, 155_000_000,
+    162_550_000, 195_000_000, 488_000_000, 617_000_000, 734_000_000,
+    881_000_000, 944_000_000, 1_090_000_000,
     # 1_227_000_000,  # GPS L2 — E4000 PLL doesn't lock here.
-    1_350_000_000,
-    1_575_420_000,
-    1_602_000_000,
-    1_675_000_000,
+    1_350_000_000, 1_575_420_000, 1_602_000_000, 1_675_000_000,
 ]
 
 
@@ -146,9 +140,27 @@ def _energy_dbm(iq: np.ndarray) -> float:
 # sensors, TPMS, LoRa, etc.). Midband-only freqs above 1 GHz aren't worth
 # capturing — we have no decoder for them.
 _CAPTURE_ELIGIBLE_HZ: frozenset[int] = frozenset({
-    303_825_000, 315_000_000, 345_000_000, 390_000_000, 418_000_000,
-    433_920_000, 462_500_000, 488_000_000, 868_350_000, 915_000_000,
+    303_825_000, 315_000_000, 318_000_000, 345_000_000, 390_000_000,
+    418_000_000, 433_920_000, 462_500_000, 488_000_000, 868_350_000,
+    915_000_000,
 })
+
+
+# Hardcoded fallback noise floors per freq (dBm). Used as the *initial*
+# baseline so the first reading after a service restart can already
+# trigger spike captures, instead of having to learn for ~26 sweep cycles.
+# Empirically observed values from this hardware; the EMA refines them.
+_INITIAL_FLOOR_DBM: dict[int, float] = {
+    25_000_000:    -70.5,  98_000_000:    -70.5, 122_000_000:   -70.9,
+    146_000_000:   -70.8, 155_000_000:   -70.9, 162_550_000:   -70.9,
+    195_000_000:   -70.9, 303_825_000:   -70.6, 315_000_000:   -70.7,
+    318_000_000:   -70.6, 345_000_000:   -65.4, 390_000_000:   -68.4,
+    418_000_000:   -67.5, 433_920_000:   -70.5, 462_500_000:   -70.4,
+    488_000_000:   -70.5, 617_000_000:   -68.7, 734_000_000:   -63.8,
+    868_350_000:   -65.1, 881_000_000:   -63.5, 915_000_000:   -65.5,
+    944_000_000:   -64.0, 1_090_000_000: -65.0, 1_350_000_000: -65.0,
+    1_575_420_000: -68.0, 1_602_000_000: -68.0, 1_675_000_000: -68.0,
+}
 
 
 def _save_iq_cu8(samples: np.ndarray, path) -> None:
@@ -169,10 +181,14 @@ class MidbandScanner(Scanner):
 
     # Capture IQ for offline rtl_433 decode when a sub-GHz freq exceeds its
     # rolling baseline by this many dB. The observed noise floor is stable
-    # to within ~0.5 dB on the SDRs we use, so 3 dB is a safe trigger that
-    # still catches faint emissions from periodic devices (TPMS, weather
-    # stations, garage tx ACKs) without firing on sweep jitter.
-    SPIKE_THRESHOLD_DB: float = 3.0
+    # to within ~0.2 dB so 2 dB is comfortably above jitter while still
+    # firing on faint legitimate emissions.
+    SPIKE_THRESHOLD_DB: float = 2.0
+
+    # File where the EMA baseline is persisted between runs. Without this,
+    # every service restart wipes the spike detector for ~26 sweep cycles
+    # and we miss bursts arriving in that window.
+    BASELINE_PERSIST_NAME: str = "midband_baseline.json"
 
     # EMA smoothing for the per-freq baseline. Smaller alpha = slower to
     # learn; we want stable so a single transient doesn't poison baseline.
@@ -185,7 +201,7 @@ class MidbandScanner(Scanner):
         self,
         device_index: int = 1,
         sweep_freqs_hz: list[int] | None = None,
-        dwell_seconds: float = 5.0,
+        dwell_seconds: float = 0.5,
         sample_rate_hz: int = 2_048_000,
         sample_count: int = 256 * 1024,
         capture_dir: Path | str | None = None,
@@ -204,6 +220,37 @@ class MidbandScanner(Scanner):
         self._captures_in_window = 0
         if self._capture_dir is not None:
             self._capture_dir.mkdir(parents=True, exist_ok=True)
+            self._baseline_path = self._capture_dir.parent / self.BASELINE_PERSIST_NAME
+            self._load_baselines()
+        else:
+            self._baseline_path = None
+        # Seed any freq we haven't observed with the hardcoded floor so the
+        # very first sweep cycle can already fire spike captures.
+        for f, floor in _INITIAL_FLOOR_DBM.items():
+            self._baseline.setdefault(f, floor)
+        self._baseline_dirty = False
+
+    def _load_baselines(self) -> None:
+        if self._baseline_path is None or not self._baseline_path.exists():
+            return
+        try:
+            data = json.loads(self._baseline_path.read_text())
+            if isinstance(data, dict):
+                self._baseline = {int(k): float(v) for k, v in data.items()}
+                log.info("midband: loaded %d persisted baselines", len(self._baseline))
+        except Exception:  # noqa: BLE001
+            log.exception("midband: failed loading baselines")
+
+    def _save_baselines(self) -> None:
+        if self._baseline_path is None or not self._baseline_dirty:
+            return
+        try:
+            tmp = self._baseline_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({str(k): round(v, 3) for k, v in self._baseline.items()}))
+            tmp.replace(self._baseline_path)
+            self._baseline_dirty = False
+        except Exception:  # noqa: BLE001
+            log.exception("midband: failed saving baselines")
 
     def _rate_limit_ok(self) -> bool:
         now = time.monotonic()
@@ -272,6 +319,9 @@ class MidbandScanner(Scanner):
                 sdr.gain = "auto"
                 while not self._stop_event.is_set():
                     now = asyncio.get_event_loop().time()
+                    # Persist learned baselines once per outer cycle so a
+                    # restart doesn't blank our spike detector.
+                    self._save_baselines()
                     for freq in self._freqs:
                         if self._stop_event.is_set():
                             break
@@ -312,6 +362,7 @@ class MidbandScanner(Scanner):
                                 e_dbm if base is None
                                 else base + self.BASELINE_ALPHA * (e_dbm - base)
                             )
+                            self._baseline_dirty = True
 
                         ev = Event(
                             scanner=ScannerName.MIDBAND,

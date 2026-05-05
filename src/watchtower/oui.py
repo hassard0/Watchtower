@@ -135,7 +135,12 @@ def _download_in_thread() -> bool:
                 tmp_path = CACHE_PATH + ".tmp"
                 os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
                 async with aiohttp.ClientSession(
-                    headers={"User-Agent": "Mozilla/5.0"}
+                    headers={
+                        # IEEE returns 418 to bare or generic UAs. Identify
+                        # the project so admins can contact us if needed.
+                        "User-Agent": "Watchtower/0.1 (+https://github.com/hassard0/Watchtower) python-aiohttp",
+                        "Accept": "text/plain, */*",
+                    }
                 ) as session:
                     async with session.get(OUI_URL, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                         resp.raise_for_status()
@@ -179,13 +184,23 @@ def maybe_refresh(force: bool = False) -> bool:
     """Refresh the IEEE OUI database from the network if stale.
 
     Returns True if a refresh ran. Called from the analytics loop ~once per
-    cycle; most calls return False because not enough time has elapsed.
+    cycle; most calls return False because the cache is recent enough.
     """
     global _last_refresh_unix
     now = time.time()
-    if not force and (now - _last_refresh_unix) < REFRESH_INTERVAL_SEC:
-        # Also kick a one-time download if the cache is missing.
-        if os.path.exists(CACHE_PATH) or _last_refresh_unix > 0:
-            return False
-    _last_refresh_unix = now
-    return _download_in_thread()
+    # Seed our age tracker from the cache file's mtime on first call so we
+    # don't re-download a recently downloaded file across restarts.
+    if _last_refresh_unix == 0.0:
+        try:
+            _last_refresh_unix = os.path.getmtime(CACHE_PATH)
+        except OSError:
+            _last_refresh_unix = 0.0
+    if not force and _last_refresh_unix > 0 and (now - _last_refresh_unix) < REFRESH_INTERVAL_SEC:
+        return False
+    ok = _download_in_thread()
+    if ok:
+        _last_refresh_unix = now
+    else:
+        # Back off failed refreshes for ~6 h instead of retrying every cycle.
+        _last_refresh_unix = now - REFRESH_INTERVAL_SEC + 6 * 3600
+    return ok

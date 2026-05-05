@@ -298,6 +298,39 @@ class ApiServer:
                 {"scanner": s, "events_last_hour": n, "first_unix": f, "last_unix": l}
                 for s, n, f, l in scanners
             ]
+            # The dedicated rtl_433-based subghz_scanner only fires when a
+            # supported protocol decodes — often zero in a residential RF
+            # environment. Meanwhile midband_scanner picks up keyfob, garage,
+            # walkie-talkie and LoRa emissions across <1 GHz and tags them with
+            # the matching event-kind. The user-facing "Sub-GHz" bar reads
+            # better when it reflects ALL <1 GHz emission activity, not just
+            # rtl_433's contribution. Synthesize/augment a subghz_scanner row
+            # using emission-kind events from any scanner.
+            SUBGHZ_EMISSION_KINDS = (
+                "keyfob_emission", "garage_emission", "walkietalkie_emission",
+                "lora_emission", "subghz_protocol_decoded", "unknown_subghz_burst",
+            )
+            placeholders = ",".join("?" * len(SUBGHZ_EMISSION_KINDS))
+            row = conn.execute(
+                f"SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM raw_events "
+                f"WHERE kind IN ({placeholders}) AND ts_unix > ?",
+                (*SUBGHZ_EMISSION_KINDS, now - 3600),
+            ).fetchone()
+            subghz_emission_n, subghz_first, subghz_last = row
+            existing = next((s for s in scanner_data if s["scanner"] == "subghz_scanner"), None)
+            if existing is not None:
+                # Take the larger of (rtl_433's own decodes, all sub-GHz emissions).
+                if subghz_emission_n > (existing.get("events_last_hour") or 0):
+                    existing["events_last_hour"] = subghz_emission_n
+                    existing["first_unix"] = subghz_first
+                    existing["last_unix"] = subghz_last
+            elif subghz_emission_n:
+                scanner_data.append({
+                    "scanner": "subghz_scanner",
+                    "events_last_hour": subghz_emission_n,
+                    "first_unix": subghz_first,
+                    "last_unix": subghz_last,
+                })
             entity_summary = conn.execute("""
                 SELECT
                     COUNT(*) AS total,

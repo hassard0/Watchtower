@@ -137,14 +137,21 @@ class SubDecoder:
             log.warning("sub_decoder: rtl_433 timed out on %s", job.path)
             return
         self.captures_decoded += 1
+        decoded_in_this_capture = 0
+        json_lines = 0
         for raw_line in stdout.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
+            json_lines += 1
             ev = self._line_to_event(line, job)
             if ev is not None:
                 self.events_emitted += 1
+                decoded_in_this_capture += 1
                 await self._on_event(ev)
+        log.info("sub_decoder: %s freq=%dM rtl_433 lines=%d decoded=%d total_decoded=%d/%d",
+                 job.path.name, job.freq_hz // 1_000_000, json_lines,
+                 decoded_in_this_capture, self.events_emitted, self.captures_decoded)
 
     @staticmethod
     def _line_to_event(line: str, job: CaptureJob) -> Event | None:

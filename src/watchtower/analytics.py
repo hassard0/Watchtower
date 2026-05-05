@@ -272,6 +272,26 @@ def _classify_entity_kind(scanner: str, kind: str, features: dict) -> str:
         if kind == "garage_emission":
             return "subghz_garage"
         return "subghz_device"
+    if scanner == "wifi_scanner":
+        # Beacon-emitting devices are APs; probe requests / random MACs
+        # come from clients. We currently emit WIFI_BEACON_SEEN almost
+        # exclusively (active scan on managed iface), so default to AP.
+        if kind == "wifi_probe_request":
+            return "wifi_random" if features.get("is_random_mac") else "wifi_client"
+        if features.get("is_random_mac"):
+            return "wifi_random"
+        return "wifi_ap"
+    if scanner == "midband_scanner":
+        # midband emissions classify by event-kind (set in _label_for_freq).
+        if kind == "keyfob_emission":
+            return "subghz_keyfob"
+        if kind == "garage_emission":
+            return "subghz_garage"
+        if kind == "lora_emission":
+            return "subghz_lora"
+        if kind == "walkietalkie_emission":
+            return "subghz_walkie"
+        return "rf_emission"
     return "unknown"
 
 

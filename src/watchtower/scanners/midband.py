@@ -181,9 +181,12 @@ class MidbandScanner(Scanner):
 
     # Capture IQ for offline rtl_433 decode when a sub-GHz freq exceeds its
     # rolling baseline by this many dB. The observed noise floor is stable
-    # to within ~0.2 dB so 2 dB is comfortably above jitter while still
-    # firing on faint legitimate emissions.
-    SPIKE_THRESHOLD_DB: float = 2.0
+    # to within ~0.2 dB. 1.0 dB is the lowest setting that still avoids
+    # firing on natural sweep-to-sweep jitter, and is sensitive enough to
+    # catch faint button presses where RF is attenuated by walls/distance.
+    # The rate-limit (CAPTURE_RATE_LIMIT_PER_MIN) protects disk if we trip
+    # on something noisy.
+    SPIKE_THRESHOLD_DB: float = 1.0
 
     # File where the EMA baseline is persisted between runs. Without this,
     # every service restart wipes the spike detector for ~26 sweep cycles
@@ -262,13 +265,15 @@ class MidbandScanner(Scanner):
         self._captures_in_window += 1
         return True
 
-    def _maybe_capture(self, sdr, freq_hz: int) -> bool:
-        """Read an extra IQ window and submit to the offline decoder.
+    def _maybe_capture(self, sdr, freq_hz: int, spike_iq: np.ndarray) -> bool:
+        """Save the spike-detecting IQ + extra tail samples to disk for offline
+        decode.
 
-        Most sub-GHz protocols send 50-500 ms packets; the standard 256K
-        samples at 2.048 MS/s is 125 ms, often truncating bursts. We grab
-        another 1024K samples (~500 ms) so most of the burst is captured
-        and rtl_433's per-protocol decoders have enough data.
+        spike_iq is the IQ window that triggered the spike check — the burst
+        (or its leading edge) is *here*, not in samples that follow. We then
+        read another ~500 ms to capture the trailing portion of longer packets
+        (some weather sensors and TPMS frames run 200-500 ms). Total capture
+        is ~625 ms which fits any rtl_433 supported protocol.
         """
         if not self._rate_limit_ok():
             return False
@@ -277,10 +282,18 @@ class MidbandScanner(Scanner):
         except Exception:  # noqa: BLE001
             log.exception("midband: capture read_samples failed")
             return False
+        # Concatenate trigger window + tail. Keep complex64 throughout.
+        try:
+            spike_arr = np.asarray(spike_iq, dtype=np.complex64)
+            extra_arr = np.asarray(extra, dtype=np.complex64)
+            combined = np.concatenate((spike_arr, extra_arr))
+        except Exception:  # noqa: BLE001
+            log.exception("midband: capture concat failed")
+            return False
         try:
             ts = int(time.time())
             path = self._capture_dir / f"{freq_hz}-{ts}-{int(time.monotonic()*1000)%10000:04d}.cu8"
-            _save_iq_cu8(np.asarray(extra, dtype=np.complex64), path)
+            _save_iq_cu8(combined, path)
         except Exception:  # noqa: BLE001
             log.exception("midband: capture write failed")
             return False
@@ -316,7 +329,14 @@ class MidbandScanner(Scanner):
 
             try:
                 sdr.sample_rate = self._sample_rate
-                sdr.gain = "auto"
+                # Fixed high gain instead of "auto" — auto can settle too low
+                # for weak distant transmitters (residential garage opener at
+                # the far side of the house). 40 dB is well below the R820T2
+                # max of 49.6 dB so we stay out of saturation.
+                try:
+                    sdr.gain = 40
+                except Exception:  # noqa: BLE001
+                    sdr.gain = "auto"
                 while not self._stop_event.is_set():
                     now = asyncio.get_event_loop().time()
                     # Persist learned baselines once per outer cycle so a
@@ -348,14 +368,16 @@ class MidbandScanner(Scanner):
 
                         # Trigger an offline-decode capture if the energy at
                         # this <1 GHz freq spiked above its learned baseline.
-                        # Skip if no capture sink wired up (e.g., test runs).
+                        # We include the IQ that *detected* the spike — the
+                        # burst itself is in `iq`, not in samples that come
+                        # later — plus extra samples for the burst tail.
                         spiked = False
                         if (self._capture_callback is not None
                                 and self._capture_dir is not None
                                 and freq in _CAPTURE_ELIGIBLE_HZ):
                             base = self._baseline.get(freq)
                             if base is not None and (e_dbm - base) >= self.SPIKE_THRESHOLD_DB:
-                                spiked = self._maybe_capture(sdr, freq)
+                                spiked = self._maybe_capture(sdr, freq, iq)
                             # Update EMA after the spike check so a real
                             # spike doesn't immediately raise the baseline.
                             self._baseline[freq] = (

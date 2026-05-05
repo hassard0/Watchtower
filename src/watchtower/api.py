@@ -732,7 +732,15 @@ class ApiServer:
     async def index(self, request: web.Request) -> web.Response:
         index_html = STATIC_DIR / "index.html"
         if index_html.exists():
-            return web.FileResponse(index_html)
+            # Never cache the HTML — it embeds the cache-busting ?v= for the
+            # JS bundle, and a stale HTML pointing at an old JS version means
+            # the dashboard runs on outdated code (which is what made the
+            # radar disappear after a deploy: index.html cached, app.js fresh).
+            return web.FileResponse(index_html, headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            })
         return web.Response(text="dashboard not installed", status=404)
 
     async def probe_page(self, request: web.Request) -> web.Response:

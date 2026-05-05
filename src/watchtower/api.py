@@ -480,7 +480,9 @@ class ApiServer:
         }.get(order, "last_seen_unix DESC")
         scope_where = {
             "all": "1=1",
-            "active": "last_seen_unix > strftime('%s','now') - 120",
+            # 300 s matches the widened `currently_present` window — see the
+            # comment near `r["currently_present"] = ...` below.
+            "active": "last_seen_unix > strftime('%s','now') - 300",
             "anomalous": "COALESCE(anomaly_score, 0) >= 0.4 AND last_seen_unix > strftime('%s','now') - 86400",
             "unknown": "classification IS NULL",
             "enrolled": "classification IS NOT NULL",
@@ -504,7 +506,13 @@ class ApiServer:
         rows = await _offload(_query)
         for r in rows:
             r["seconds_since_seen"] = now - (r["last_seen_unix"] or 0)
-            r["currently_present"] = r["seconds_since_seen"] < 120
+            # 300 s window instead of 120 s. Analytics step occasionally takes
+            # 30+ s when it does cluster inference / pruning, and a tighter
+            # window made the dashboard radar empty during those windows then
+            # repopulate seconds later — which feels like flicker. 5 minutes
+            # is wide enough to absorb routine lag while still being "current"
+            # by any practical definition.
+            r["currently_present"] = r["seconds_since_seen"] < 300
         return web.json_response({"entities": rows, "ts_unix": now})
 
     async def entity_detail(self, request: web.Request) -> web.Response:

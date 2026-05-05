@@ -149,7 +149,21 @@ function watchtower() {
       try {
         const r = await this._fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`, 6000);
         const j = await r.json();
-        this.entities = j.entities || [];
+        const incoming = j.entities || [];
+        // Don't blow away a previously-good entity list with a momentarily
+        // empty response — that caused the radar to flicker between
+        // populated and "no signals" on every refresh tick during analytics
+        // catch-up windows. Only overwrite when the new payload has data,
+        // or after a sustained empty period (~30 s) which suggests the
+        // entities really did go away rather than a transient hiccup.
+        const now = Date.now();
+        if (incoming.length > 0) {
+          this.entities = incoming;
+          this._lastEntitiesAt = now;
+        } else if (!this._lastEntitiesAt || (now - this._lastEntitiesAt) > 30000) {
+          this.entities = incoming;
+          this._lastEntitiesAt = now;
+        }
         this.tabsLoaded = { ...this.tabsLoaded, entities: true };
       } catch (e) { console.warn('loadEntities', e.name); }
     },

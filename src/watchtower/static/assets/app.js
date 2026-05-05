@@ -125,25 +125,38 @@ function watchtower() {
       this.refresh();
     },
 
+    // fetch wrapped with an explicit timeout. Without this, a hung request
+    // can hold a connection slot forever (browsers limit ~6 concurrent
+    // HTTP/1.1 connections per host, so a few stalls block everything).
+    async _fetch(url, timeoutMs) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs || 6000);
+      try {
+        return await fetch(url, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(t);
+      }
+    },
+
     async loadState() {
       try {
-        const r = await fetch('/api/state');
+        const r = await this._fetch('/api/state', 4000);
         this.state = await r.json();
-      } catch (e) { console.warn('loadState', e); }
+      } catch (e) { console.warn('loadState', e.name); }
     },
 
     async loadEntities() {
       try {
-        const r = await fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`);
+        const r = await this._fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`, 6000);
         const j = await r.json();
         this.entities = j.entities || [];
         this.tabsLoaded = { ...this.tabsLoaded, entities: true };
-      } catch (e) { console.warn('loadEntities', e); }
+      } catch (e) { console.warn('loadEntities', e.name); }
     },
 
     async loadAlerts() {
       try {
-        const r = await fetch('/api/alerts');
+        const r = await this._fetch('/api/alerts', 6000);
         const j = await r.json();
         const newAlerts = j.alerts || [];
         // Toast for any high/critical alert we've never shown before.

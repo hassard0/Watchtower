@@ -107,71 +107,77 @@ def save_settings(db_path, settings: dict) -> None:
 def _dispatch_external(settings: dict, alert_payload: dict) -> None:
     """Fire-and-forget external delivery: ntfy push, webhook POST, MQTT publish.
 
-    Called inline from _fire(). Non-blocking-ish: short timeouts, exceptions
-    swallowed (logged) so a flaky external never breaks rule evaluation.
+    Each transport blocks for up to its timeout (4-10 s) on a flaky network;
+    when called inline from _fire() inside the analytics step, that stalled
+    the writer thread and made the dashboard feel flakey. Spawn a daemon
+    thread per dispatch so the analytics step returns immediately.
     """
-    severity = alert_payload.get("severity") or "medium"
-    rule_id = alert_payload.get("rule_id") or "alert"
-    sev_rank = _SEVERITY_RANK.get(severity, 1)
+    import threading
 
-    # ---- ntfy ----
-    if settings.get("ntfy_enabled") and settings.get("ntfy_topic"):
-        min_sev = _SEVERITY_RANK.get(settings.get("ntfy_min_severity") or "high", 2)
-        if sev_rank >= min_sev:
+    def _do_dispatch():
+        severity = alert_payload.get("severity") or "medium"
+        rule_id = alert_payload.get("rule_id") or "alert"
+        sev_rank = _SEVERITY_RANK.get(severity, 1)
+
+        # ---- ntfy ----
+        if settings.get("ntfy_enabled") and settings.get("ntfy_topic"):
+            min_sev = _SEVERITY_RANK.get(settings.get("ntfy_min_severity") or "high", 2)
+            if sev_rank >= min_sev:
+                try:
+                    import urllib.request
+                    base = (settings.get("ntfy_url") or "https://ntfy.sh").rstrip("/")
+                    topic = settings["ntfy_topic"].strip("/")
+                    url = f"{base}/{topic}"
+                    evidence = alert_payload.get("evidence") or {}
+                    ev_brief = " · ".join(f"{k}={v}" for k, v in list(evidence.items())[:4])
+                    body = f"[{severity.upper()}] {rule_id}\n{alert_payload.get('entity_id') or ''}\n{ev_brief}".encode("utf-8")
+                    priority_map = {"low": 2, "medium": 3, "high": 4, "critical": 5}
+                    tag_map = {"low": "speech_balloon", "medium": "warning", "high": "rotating_light", "critical": "rotating_light"}
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        headers={
+                            "Title": f"Watchtower · {rule_id}",
+                            "Priority": str(priority_map.get(severity, 3)),
+                            "Tags": tag_map.get(severity, "warning"),
+                            "Click": "http://watchtower.local:8080/",
+                        },
+                    )
+                    urllib.request.urlopen(req, timeout=4)
+                except Exception:  # noqa: BLE001
+                    log.warning("ntfy dispatch failed (transport-only, alert still logged)")
+
+        # ---- webhook ----
+        if settings.get("webhook_enabled") and settings.get("webhook_url"):
             try:
                 import urllib.request
-                base = (settings.get("ntfy_url") or "https://ntfy.sh").rstrip("/")
-                topic = settings["ntfy_topic"].strip("/")
-                url = f"{base}/{topic}"
-                evidence = alert_payload.get("evidence") or {}
-                ev_brief = " · ".join(f"{k}={v}" for k, v in list(evidence.items())[:4])
-                body = f"[{severity.upper()}] {rule_id}\n{alert_payload.get('entity_id') or ''}\n{ev_brief}".encode("utf-8")
-                # ntfy reads Title/Priority/Tags from headers
-                priority_map = {"low": 2, "medium": 3, "high": 4, "critical": 5}
-                tag_map = {"low": "speech_balloon", "medium": "warning", "high": "rotating_light", "critical": "rotating_light"}
                 req = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers={
-                        "Title": f"Watchtower · {rule_id}",
-                        "Priority": str(priority_map.get(severity, 3)),
-                        "Tags": tag_map.get(severity, "warning"),
-                        "Click": "http://watchtower.local:8080/",
-                    },
+                    settings["webhook_url"],
+                    data=json.dumps(alert_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
                 )
                 urllib.request.urlopen(req, timeout=4)
             except Exception:  # noqa: BLE001
-                log.exception("ntfy dispatch failed")
+                log.warning("webhook dispatch failed (transport-only, alert still logged)")
 
-    # ---- webhook ----
-    if settings.get("webhook_enabled") and settings.get("webhook_url"):
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                settings["webhook_url"],
-                data=json.dumps(alert_payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=4)
-        except Exception:  # noqa: BLE001
-            log.exception("webhook dispatch failed")
+        # ---- MQTT ----
+        if settings.get("mqtt_enabled") and settings.get("mqtt_host"):
+            try:
+                import paho.mqtt.publish as mqtt_publish
+                prefix = (settings.get("mqtt_topic_prefix") or "watchtower").strip("/")
+                topic = f"{prefix}/alerts/{severity}"
+                mqtt_publish.single(
+                    topic,
+                    payload=json.dumps(alert_payload),
+                    hostname=settings["mqtt_host"],
+                    port=int(settings.get("mqtt_port") or 1883),
+                    keepalive=10,
+                    retain=False,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("mqtt dispatch failed (transport-only, alert still logged)")
 
-    # ---- MQTT ----
-    if settings.get("mqtt_enabled") and settings.get("mqtt_host"):
-        try:
-            import paho.mqtt.publish as mqtt_publish
-            prefix = (settings.get("mqtt_topic_prefix") or "watchtower").strip("/")
-            topic = f"{prefix}/alerts/{severity}"
-            mqtt_publish.single(
-                topic,
-                payload=json.dumps(alert_payload),
-                hostname=settings["mqtt_host"],
-                port=int(settings.get("mqtt_port") or 1883),
-                keepalive=10,
-                retain=False,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("mqtt dispatch failed")
+    threading.Thread(target=_do_dispatch, name="alert-dispatch", daemon=True).start()
 
 
 def _hour_of_week(ts_unix: int) -> int:

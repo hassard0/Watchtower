@@ -172,7 +172,122 @@ class ApiServer:
         self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()
         self._probe_task = asyncio.create_task(self._probe_finalizer_loop())
+        self._warmer_task = asyncio.create_task(self._cache_warmer_loop())
         log.info("api: listening on http://%s:%d", self._host, self._port)
+
+    async def _cache_warmer_loop(self) -> None:
+        """Pre-warm the heaviest endpoint caches in the background.
+
+        Without this, the first browser refresh after a 10-second idle
+        hits a cold cache and waits ~750 ms for /api/state. With this
+        loop running every 7 s the cache is never older than 7 s and
+        page reloads always hit warm.
+        """
+        await asyncio.sleep(2.0)  # let the service finish settling
+        while not self._stopping:
+            try:
+                # Just call our own _build_state_db_block helper. Keep it
+                # opportunistic — don't crash the loop on a transient DB
+                # error, just retry next tick.
+                await self._refresh_state_cache()
+            except Exception:  # noqa: BLE001
+                log.warning("cache_warmer: state refresh failed (will retry)")
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.sleep(7.0)), timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                break
+
+    async def _refresh_state_cache(self) -> None:
+        """Run the state DB block now and write the result into the cache."""
+        now_unix = int(time.time())
+        db_path = self._db
+
+        def _query():
+            return self._state_db_block_inner(db_path, now_unix)
+
+        result = await _offload(_query)
+        _query_cache["state_db_block"] = (time.time(), result)
+
+    @staticmethod
+    def _state_db_block_inner(db_path, now_unix):
+        # Mirrors the logic in `state` so the warmer and the request
+        # handler stay in lock-step.
+        with get_connection(db_path) as conn:
+            scanners = conn.execute("""
+                SELECT scanner, COUNT(*) AS n,
+                       MIN(ts_unix) AS first, MAX(ts_unix) AS last
+                FROM raw_events
+                WHERE ts_unix > ?
+                GROUP BY scanner
+            """, (now_unix - 3600,)).fetchall()
+            scanner_data = [
+                {"scanner": s, "events_last_hour": n, "first_unix": f, "last_unix": l}
+                for s, n, f, l in scanners
+            ]
+            SUBGHZ_EMISSION_KINDS = (
+                "keyfob_emission", "garage_emission", "walkietalkie_emission",
+                "lora_emission", "subghz_protocol_decoded", "unknown_subghz_burst",
+            )
+            placeholders = ",".join("?" * len(SUBGHZ_EMISSION_KINDS))
+            row = conn.execute(
+                f"SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM raw_events "
+                f"WHERE kind IN ({placeholders}) AND ts_unix > ?",
+                (*SUBGHZ_EMISSION_KINDS, now_unix - 3600),
+            ).fetchone()
+            subghz_emission_n, subghz_first, subghz_last = row
+            existing = next((s for s in scanner_data if s["scanner"] == "subghz_scanner"), None)
+            if existing is not None:
+                if subghz_emission_n > (existing.get("events_last_hour") or 0):
+                    existing["events_last_hour"] = subghz_emission_n
+                    existing["first_unix"] = subghz_first
+                    existing["last_unix"] = subghz_last
+            elif subghz_emission_n:
+                scanner_data.append({
+                    "scanner": "subghz_scanner",
+                    "events_last_hour": subghz_emission_n,
+                    "first_unix": subghz_first,
+                    "last_unix": subghz_last,
+                })
+            entity_summary = conn.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN classification = 'anchor' THEN 1 ELSE 0 END) AS anchors,
+                    SUM(CASE WHEN classification = 'satellite' THEN 1 ELSE 0 END) AS satellites,
+                    SUM(CASE WHEN classification = 'known_guest' THEN 1 ELSE 0 END) AS known_guests,
+                    SUM(CASE WHEN classification IS NULL THEN 1 ELSE 0 END) AS unknown,
+                    SUM(CASE WHEN last_seen_unix > ? THEN 1 ELSE 0 END) AS active_now,
+                    SUM(CASE WHEN COALESCE(anomaly_score,0) >= 0.5 AND last_seen_unix > ? THEN 1 ELSE 0 END) AS anomalous_now
+                FROM entities
+                WHERE last_seen_unix > ?
+            """, (now_unix - 120, now_unix - 120, now_unix - 7 * 86400)).fetchone()
+            anchor_present = conn.execute(
+                "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
+                (now_unix - 600,),
+            ).fetchone()
+            any_anchor = conn.execute(
+                "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
+            ).fetchone() is not None
+            unack_alerts = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE acknowledged = 0 AND ts_unix > ?",
+                (now_unix - 86400,),
+            ).fetchone()[0]
+            baseline_progress = conn.execute(
+                "SELECT COUNT(DISTINCT (feature || ':' || hour_of_week)) AS buckets, COUNT(DISTINCT feature) AS features FROM baseline_stats"
+            ).fetchone()
+            hp_row = conn.execute(
+                "SELECT value, updated_unix FROM analytics_state WHERE key = 'honeypot_active_lure'"
+            ).fetchone()
+            honeypot_active = None
+            if hp_row and hp_row[0]:
+                try:
+                    hpd = json.loads(hp_row[0])
+                    hpd["set_at_unix"] = hpd.get("set_at_unix") or hp_row[1]
+                    honeypot_active = hpd
+                except Exception:  # noqa: BLE001
+                    pass
+        settings = load_settings(db_path)
+        return (scanner_data, entity_summary, anchor_present, any_anchor,
+                unack_alerts, baseline_progress, honeypot_active, settings)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -301,102 +416,22 @@ class ApiServer:
         db_path = self._db
 
         # /api/state is the heaviest poll target — fired every 5 s by the
-        # dashboard for the Scanners panel + Home state header. Cache the
-        # whole DB block for 4 s so consecutive polls share work, but not
-        # so long that anomaly counts feel stale.
+        # dashboard. The cold call is ~750 ms because it runs 7 sequential
+        # queries against a 700 MB DB; subsequent calls within TTL are
+        # cache hits at <2 ms. TTL of 10 s comfortably covers the 5 s poll
+        # cadence so we never alternate hot/cold (which felt "flakey" to
+        # the user). The data underneath changes once per 30 s analytics
+        # cycle so 10 s is well within the freshness budget.
         cache_hit = _query_cache.get("state_db_block")
-        if cache_hit and (time.time() - cache_hit[0]) < 4.0:
+        if cache_hit and (time.time() - cache_hit[0]) < 10.0:
             cached_result = cache_hit[1]
             (scanner_data, entity_summary, anchor_present, any_anchor,
              unack_alerts, baseline_progress, honeypot_active, settings) = cached_result
         else:
-            cached_result = None
-
-        def _query():
-            with get_connection(db_path) as conn:
-                scanners = conn.execute("""
-                    SELECT scanner, COUNT(*) AS n,
-                           MIN(ts_unix) AS first, MAX(ts_unix) AS last
-                    FROM raw_events
-                    WHERE ts_unix > ?
-                    GROUP BY scanner
-                """, (now - 3600,)).fetchall()
-                scanner_data = [
-                    {"scanner": s, "events_last_hour": n, "first_unix": f, "last_unix": l}
-                    for s, n, f, l in scanners
-                ]
-                SUBGHZ_EMISSION_KINDS = (
-                    "keyfob_emission", "garage_emission", "walkietalkie_emission",
-                    "lora_emission", "subghz_protocol_decoded", "unknown_subghz_burst",
-                )
-                placeholders = ",".join("?" * len(SUBGHZ_EMISSION_KINDS))
-                row = conn.execute(
-                    f"SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM raw_events "
-                    f"WHERE kind IN ({placeholders}) AND ts_unix > ?",
-                    (*SUBGHZ_EMISSION_KINDS, now - 3600),
-                ).fetchone()
-                subghz_emission_n, subghz_first, subghz_last = row
-                existing = next((s for s in scanner_data if s["scanner"] == "subghz_scanner"), None)
-                if existing is not None:
-                    if subghz_emission_n > (existing.get("events_last_hour") or 0):
-                        existing["events_last_hour"] = subghz_emission_n
-                        existing["first_unix"] = subghz_first
-                        existing["last_unix"] = subghz_last
-                elif subghz_emission_n:
-                    scanner_data.append({
-                        "scanner": "subghz_scanner",
-                        "events_last_hour": subghz_emission_n,
-                        "first_unix": subghz_first,
-                        "last_unix": subghz_last,
-                    })
-                entity_summary = conn.execute("""
-                    SELECT
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN classification = 'anchor' THEN 1 ELSE 0 END) AS anchors,
-                        SUM(CASE WHEN classification = 'satellite' THEN 1 ELSE 0 END) AS satellites,
-                        SUM(CASE WHEN classification = 'known_guest' THEN 1 ELSE 0 END) AS known_guests,
-                        SUM(CASE WHEN classification IS NULL THEN 1 ELSE 0 END) AS unknown,
-                        SUM(CASE WHEN last_seen_unix > ? THEN 1 ELSE 0 END) AS active_now,
-                        SUM(CASE WHEN COALESCE(anomaly_score,0) >= 0.5 AND last_seen_unix > ? THEN 1 ELSE 0 END) AS anomalous_now
-                    FROM entities
-                    WHERE last_seen_unix > ?
-                """, (now - 120, now - 120, now - 7 * 86400)).fetchone()
-                anchor_present = conn.execute(
-                    "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
-                    (now - 600,),
-                ).fetchone()
-                any_anchor = conn.execute(
-                    "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
-                ).fetchone() is not None
-                unack_alerts = conn.execute(
-                    "SELECT COUNT(*) FROM alerts WHERE acknowledged = 0 AND ts_unix > ?",
-                    (now - 86400,),
-                ).fetchone()[0]
-                baseline_progress = conn.execute(
-                    "SELECT COUNT(DISTINCT (feature || ':' || hour_of_week)) AS buckets, COUNT(DISTINCT feature) AS features FROM baseline_stats"
-                ).fetchone()
-                hp_row = conn.execute(
-                    "SELECT value, updated_unix FROM analytics_state WHERE key = 'honeypot_active_lure'"
-                ).fetchone()
-                honeypot_active = None
-                if hp_row and hp_row[0]:
-                    try:
-                        hpd = json.loads(hp_row[0])
-                        hpd["set_at_unix"] = hpd.get("set_at_unix") or hp_row[1]
-                        honeypot_active = hpd
-                    except Exception:  # noqa: BLE001
-                        pass
-            settings = load_settings(db_path)
-            return (scanner_data, entity_summary, anchor_present, any_anchor,
-                    unack_alerts, baseline_progress, honeypot_active, settings)
-
-        if cached_result is None:
+            result = await _offload(self._state_db_block_inner, db_path, now)
+            _query_cache["state_db_block"] = (time.time(), result)
             (scanner_data, entity_summary, anchor_present, any_anchor,
-             unack_alerts, baseline_progress, honeypot_active, settings) = await _offload(_query)
-            _query_cache["state_db_block"] = (time.time(), (
-                scanner_data, entity_summary, anchor_present, any_anchor,
-                unack_alerts, baseline_progress, honeypot_active, settings,
-            ))
+             unack_alerts, baseline_progress, honeypot_active, settings) = result
 
         if not any_anchor:
             home_state = "unknown"
@@ -596,25 +631,38 @@ class ApiServer:
         return web.json_response({"ok": True, "result": result})
 
     async def alerts(self, request: web.Request) -> web.Response:
-        since = int(request.query.get("since", str(int(time.time()) - 86400)))
-        with get_connection(self._db) as conn:
-            cursor = conn.execute("""
-                SELECT a.alert_id, a.ts_unix, a.rule_id, a.severity, a.entity_id, a.score,
-                       a.home_state, a.evidence_json, a.acknowledged, a.user_feedback,
-                       e.friendly_name, e.kind, e.classification
-                FROM alerts a
-                LEFT JOIN entities e ON a.entity_id = e.entity_id
-                WHERE a.ts_unix > ?
-                ORDER BY a.ts_unix DESC
-                LIMIT 500
-            """, (since,))
-            cols = [c[0] for c in cursor.description]
-            rows = []
-            for r in cursor.fetchall():
-                d = dict(zip(cols, r))
-                d["evidence"] = json.loads(d.pop("evidence_json")) if d.get("evidence_json") else {}
-                rows.append(d)
-        return web.json_response({"alerts": rows, "ts_unix": int(time.time())})
+        # Default window is 4 hours and 100 rows so the dashboard's 5-second
+        # poll doesn't drag down a 200 KB payload. The Alerts tab can pass
+        # ?since=<unix>&limit=500 when the user scrolls back. Without this
+        # the page-refresh feel was flakey on weak Wi-Fi: 200 KB / 5 s of
+        # the same data being re-fetched ate the connection.
+        now_unix = int(time.time())
+        since = int(request.query.get("since", str(now_unix - 4 * 3600)))
+        limit = max(1, min(500, int(request.query.get("limit", "100"))))
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT a.alert_id, a.ts_unix, a.rule_id, a.severity, a.entity_id, a.score,
+                           a.home_state, a.evidence_json, a.acknowledged, a.user_feedback,
+                           e.friendly_name, e.kind, e.classification
+                    FROM alerts a
+                    LEFT JOIN entities e ON a.entity_id = e.entity_id
+                    WHERE a.ts_unix > ?
+                    ORDER BY a.ts_unix DESC
+                    LIMIT ?
+                """, (since, limit))
+                cols = [c[0] for c in cursor.description]
+                rows = []
+                for r in cursor.fetchall():
+                    d = dict(zip(cols, r))
+                    d["evidence"] = json.loads(d.pop("evidence_json")) if d.get("evidence_json") else {}
+                    rows.append(d)
+                return rows
+
+        rows = await _offload(_query)
+        return web.json_response({"alerts": rows, "ts_unix": now_unix})
 
     async def alert_feedback(self, request: web.Request) -> web.Response:
         aid = request.match_info["aid"]

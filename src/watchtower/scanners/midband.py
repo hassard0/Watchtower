@@ -23,8 +23,13 @@ from watchtower.scanners.base import Scanner
 log = logging.getLogger(__name__)
 
 # Map a center freq (Hz) to a friendly band label and event kind.
-# Expanded for wide-band sweep coverage across 24 MHz – 1.7 GHz.
+# Two-tier coverage: broad allocations describe the "general zone" so any hit
+# falls inside *something*; narrow allocations carve out the security-relevant
+# sub-bands (keyfobs, TPMS, garage doors, EU LoRa). _label_for_freq picks the
+# narrowest matching entry, so a 433.92 MHz hit is "ISM-433 / KEYFOB_EMISSION"
+# rather than "Amateur-70cm / CELLULAR_BAND_ENERGY".
 _BAND_LABELS: list[tuple[int, int, str, EventKind]] = [
+    # ---------- Broad / catch-all allocations ----------
     ( 24_000_000,   54_000_000, "HF-low",        EventKind.CELLULAR_BAND_ENERGY),
     ( 88_000_000,  108_000_000, "FM-broadcast",  EventKind.AVIATION_BAND_ENERGY),
     (108_000_000,  138_000_000, "Aviation-VHF",  EventKind.AVIATION_BAND_ENERGY),
@@ -32,9 +37,7 @@ _BAND_LABELS: list[tuple[int, int, str, EventKind]] = [
     (148_000_000,  174_000_000, "VHF-business",  EventKind.WALKIETALKIE_EMISSION),
     (174_000_000,  216_000_000, "VHF-TV",        EventKind.CELLULAR_BAND_ENERGY),
     (225_000_000,  400_000_000, "Mil-Aero-UHF",  EventKind.AVIATION_BAND_ENERGY),
-    (310_000_000,  320_000_000, "Keyfob-315",    EventKind.KEYFOB_EMISSION),
     (430_000_000,  440_000_000, "Amateur-70cm",  EventKind.CELLULAR_BAND_ENERGY),
-    (433_500_000,  434_500_000, "ISM-433",       EventKind.KEYFOB_EMISSION),
     (462_000_000,  468_000_000, "FRS-GMRS",      EventKind.WALKIETALKIE_EMISSION),
     (470_000_000,  512_000_000, "UHF-TV-low",    EventKind.CELLULAR_BAND_ENERGY),
     (614_000_000,  698_000_000, "UHF-TV-high",   EventKind.CELLULAR_BAND_ENERGY),
@@ -47,12 +50,34 @@ _BAND_LABELS: list[tuple[int, int, str, EventKind]] = [
     (1_300_000_000, 1_400_000_000, "Cellular-L", EventKind.CELLULAR_BAND_ENERGY),
     (1_563_000_000, 1_587_000_000, "GPS-L1",     EventKind.AVIATION_BAND_ENERGY),
     (1_590_000_000, 1_700_000_000, "Sat-DL",     EventKind.CELLULAR_BAND_ENERGY),
+    # ---------- Narrow / security-relevant overrides ----------
+    # NOAA weather radio (continuous broadcast — useful as a "RF chain alive" reference).
+    (162_400_000,  162_600_000, "NOAA-WX",       EventKind.WALKIETALKIE_EMISSION),
+    # Honda/Acura/Toyota/Hyundai keyfobs cluster in 303-307 MHz.
+    (303_500_000,  308_000_000, "Keyfob-303",    EventKind.KEYFOB_EMISSION),
+    # US/Asia keyfobs + TPMS centered at 315 MHz.
+    (310_000_000,  320_000_000, "Keyfob-315",    EventKind.KEYFOB_EMISSION),
+    # 345/347 MHz: TPMS and some Korean/Japanese keyfobs.
+    (344_000_000,  348_500_000, "TPMS-345",      EventKind.KEYFOB_EMISSION),
+    # 390 MHz garage-door openers (Liftmaster Security+, Genie Intellicode, Chamberlain).
+    (388_000_000,  392_000_000, "Garage-390",    EventKind.GARAGE_EMISSION),
+    # 418 MHz: legacy European key-fobs / RFID readers (esp. older BMW/Mercedes).
+    (417_500_000,  418_500_000, "EU-Keyfob-418", EventKind.KEYFOB_EMISSION),
+    # ISM 433.92 MHz: weather stations, doorbells, garage remotes, generic keyfobs, RTL-SDR
+    # community sensors, TPMS in EU/some US, BLE-mesh-extender beacons.
+    (433_500_000,  434_500_000, "ISM-433",       EventKind.KEYFOB_EMISSION),
+    # EU SRD: 868 MHz LoRa, Z-Wave EU, ZigBee subset — falls inside our broad
+    # Cellular-850 (824-894) entry; a narrow override re-tags it correctly.
+    (863_000_000,  870_000_000, "EU-SRD-868",    EventKind.LORA_EMISSION),
+    # Z-Wave US is centered at 908.42 MHz inside ISM-902 (already LORA_EMISSION).
 ]
 
 
-# Default wide-band sweep: 22 representative center frequencies.
-# Skips 1100-1250 MHz where the E4000 tuner has a PLL gap. Scanner also
-# auto-skips bad frequencies at runtime (5 min cooldown).
+# Default wide-band sweep: representative center frequencies covering the
+# allocations a residential intrusion-monitor cares about. Skips 1100-1250
+# MHz where the E4000 tuner has a PLL gap; scanner also auto-skips bad
+# frequencies at runtime (5 min cooldown). At ~1s dwell each, full cycle
+# is ~27 s.
 DEFAULT_SWEEP_FREQS_HZ: list[int] = [
     25_000_000,
     98_000_000,
@@ -61,14 +86,19 @@ DEFAULT_SWEEP_FREQS_HZ: list[int] = [
     155_000_000,
     162_550_000,
     195_000_000,
+    303_825_000,    # Honda/Acura keyfobs
     315_000_000,
+    345_000_000,    # TPMS sensors
+    390_000_000,    # Liftmaster/Chamberlain/Genie garage doors
+    418_000_000,    # legacy EU keyfobs
     433_920_000,
     462_500_000,
     488_000_000,
     617_000_000,
     734_000_000,
+    868_350_000,    # EU LoRa / Z-Wave EU centre
     881_000_000,
-    915_000_000,
+    915_000_000,    # US LoRa / Z-Wave US (908.42 falls in this dwell)
     944_000_000,
     1_090_000_000,
     # 1_227_000_000,  # GPS L2 — E4000 PLL doesn't lock here.

@@ -5,7 +5,35 @@ import numpy as np
 import pytest
 
 from watchtower.events import EventKind, Scanner as ScannerName
-from watchtower.scanners.midband import MidbandScanner, _energy_dbm
+from watchtower.scanners.midband import (
+    MidbandScanner, _energy_dbm, _label_for_freq, DEFAULT_SWEEP_FREQS_HZ,
+)
+
+
+def test_label_for_freq_picks_narrowest_match():
+    # Common security-relevant <1 GHz allocations all need to land on the
+    # narrow-and-correct label, not the broader containing range.
+    cases = [
+        (303_825_000, "Keyfob-303",    EventKind.KEYFOB_EMISSION),    # was Mil-Aero
+        (315_000_000, "Keyfob-315",    EventKind.KEYFOB_EMISSION),    # was Mil-Aero
+        (345_000_000, "TPMS-345",      EventKind.KEYFOB_EMISSION),    # was Mil-Aero
+        (390_000_000, "Garage-390",    EventKind.GARAGE_EMISSION),    # was Mil-Aero
+        (418_000_000, "EU-Keyfob-418", EventKind.KEYFOB_EMISSION),    # was OutOfBand
+        (433_920_000, "ISM-433",       EventKind.KEYFOB_EMISSION),    # was Amateur-70cm
+        (162_550_000, "NOAA-WX",       EventKind.WALKIETALKIE_EMISSION),
+        (868_350_000, "EU-SRD-868",    EventKind.LORA_EMISSION),      # was Cellular-850
+    ]
+    for freq, expected_label, expected_kind in cases:
+        label, kind = _label_for_freq(freq)
+        assert label == expected_label, f"{freq}: got {label!r} expected {expected_label!r}"
+        assert kind == expected_kind, f"{freq}: got {kind} expected {expected_kind}"
+
+
+def test_default_sweep_includes_security_critical_freqs():
+    # Each band we care about should be visited by the default sweep.
+    for required in (303_825_000, 315_000_000, 345_000_000, 390_000_000,
+                     418_000_000, 433_920_000, 868_350_000, 915_000_000):
+        assert required in DEFAULT_SWEEP_FREQS_HZ, f"missing {required} from sweep"
 
 
 def test_energy_dbm_scales_with_amplitude():

@@ -43,6 +43,18 @@ def _cached(key: str, ttl_sec: float, compute):
     return value
 
 
+async def _offload(fn, *args, **kwargs):
+    """Run a synchronous DB function in a worker thread.
+
+    sqlite3 calls block the asyncio loop. When the dashboard fires several
+    endpoints in parallel on tab-switch, each blocking call serializes the
+    others — making page loads feel flakey even when individual queries
+    are fast. Wrapping the synchronous block in asyncio.to_thread keeps
+    the loop responsive so concurrent handlers actually run concurrently.
+    """
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 def _row_to_dict(cursor, row) -> dict[str, Any]:
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 
@@ -286,89 +298,88 @@ class ApiServer:
 
     async def state(self, request: web.Request) -> web.Response:
         now = int(time.time())
-        with get_connection(self._db) as conn:
-            scanners = conn.execute("""
-                SELECT scanner, COUNT(*) AS n,
-                       MIN(ts_unix) AS first, MAX(ts_unix) AS last
-                FROM raw_events
-                WHERE ts_unix > ?
-                GROUP BY scanner
-            """, (now - 3600,)).fetchall()
-            scanner_data = [
-                {"scanner": s, "events_last_hour": n, "first_unix": f, "last_unix": l}
-                for s, n, f, l in scanners
-            ]
-            # The dedicated rtl_433-based subghz_scanner only fires when a
-            # supported protocol decodes — often zero in a residential RF
-            # environment. Meanwhile midband_scanner picks up keyfob, garage,
-            # walkie-talkie and LoRa emissions across <1 GHz and tags them with
-            # the matching event-kind. The user-facing "Sub-GHz" bar reads
-            # better when it reflects ALL <1 GHz emission activity, not just
-            # rtl_433's contribution. Synthesize/augment a subghz_scanner row
-            # using emission-kind events from any scanner.
-            SUBGHZ_EMISSION_KINDS = (
-                "keyfob_emission", "garage_emission", "walkietalkie_emission",
-                "lora_emission", "subghz_protocol_decoded", "unknown_subghz_burst",
-            )
-            placeholders = ",".join("?" * len(SUBGHZ_EMISSION_KINDS))
-            row = conn.execute(
-                f"SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM raw_events "
-                f"WHERE kind IN ({placeholders}) AND ts_unix > ?",
-                (*SUBGHZ_EMISSION_KINDS, now - 3600),
-            ).fetchone()
-            subghz_emission_n, subghz_first, subghz_last = row
-            existing = next((s for s in scanner_data if s["scanner"] == "subghz_scanner"), None)
-            if existing is not None:
-                # Take the larger of (rtl_433's own decodes, all sub-GHz emissions).
-                if subghz_emission_n > (existing.get("events_last_hour") or 0):
-                    existing["events_last_hour"] = subghz_emission_n
-                    existing["first_unix"] = subghz_first
-                    existing["last_unix"] = subghz_last
-            elif subghz_emission_n:
-                scanner_data.append({
-                    "scanner": "subghz_scanner",
-                    "events_last_hour": subghz_emission_n,
-                    "first_unix": subghz_first,
-                    "last_unix": subghz_last,
-                })
-            entity_summary = conn.execute("""
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN classification = 'anchor' THEN 1 ELSE 0 END) AS anchors,
-                    SUM(CASE WHEN classification = 'satellite' THEN 1 ELSE 0 END) AS satellites,
-                    SUM(CASE WHEN classification = 'known_guest' THEN 1 ELSE 0 END) AS known_guests,
-                    SUM(CASE WHEN classification IS NULL THEN 1 ELSE 0 END) AS unknown,
-                    SUM(CASE WHEN last_seen_unix > ? THEN 1 ELSE 0 END) AS active_now,
-                    SUM(CASE WHEN COALESCE(anomaly_score,0) >= 0.5 AND last_seen_unix > ? THEN 1 ELSE 0 END) AS anomalous_now
-                FROM entities
-                WHERE last_seen_unix > ?
-            """, (now - 120, now - 120, now - 7 * 86400)).fetchone()
-            anchor_present = conn.execute(
-                "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
-                (now - 600,),
-            ).fetchone()
-            any_anchor = conn.execute(
-                "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
-            ).fetchone() is not None
-            unack_alerts = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE acknowledged = 0 AND ts_unix > ?",
-                (now - 86400,),
-            ).fetchone()[0]
-            baseline_progress = conn.execute(
-                "SELECT COUNT(DISTINCT (feature || ':' || hour_of_week)) AS buckets, COUNT(DISTINCT feature) AS features FROM baseline_stats"
-            ).fetchone()
-            hp_row = conn.execute(
-                "SELECT value, updated_unix FROM analytics_state WHERE key = 'honeypot_active_lure'"
-            ).fetchone()
-            honeypot_active = None
-            if hp_row and hp_row[0]:
-                try:
-                    hpd = json.loads(hp_row[0])
-                    hpd["set_at_unix"] = hpd.get("set_at_unix") or hp_row[1]
-                    honeypot_active = hpd
-                except Exception:  # noqa: BLE001
-                    pass
-            settings = load_settings(self._db)
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                scanners = conn.execute("""
+                    SELECT scanner, COUNT(*) AS n,
+                           MIN(ts_unix) AS first, MAX(ts_unix) AS last
+                    FROM raw_events
+                    WHERE ts_unix > ?
+                    GROUP BY scanner
+                """, (now - 3600,)).fetchall()
+                scanner_data = [
+                    {"scanner": s, "events_last_hour": n, "first_unix": f, "last_unix": l}
+                    for s, n, f, l in scanners
+                ]
+                SUBGHZ_EMISSION_KINDS = (
+                    "keyfob_emission", "garage_emission", "walkietalkie_emission",
+                    "lora_emission", "subghz_protocol_decoded", "unknown_subghz_burst",
+                )
+                placeholders = ",".join("?" * len(SUBGHZ_EMISSION_KINDS))
+                row = conn.execute(
+                    f"SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM raw_events "
+                    f"WHERE kind IN ({placeholders}) AND ts_unix > ?",
+                    (*SUBGHZ_EMISSION_KINDS, now - 3600),
+                ).fetchone()
+                subghz_emission_n, subghz_first, subghz_last = row
+                existing = next((s for s in scanner_data if s["scanner"] == "subghz_scanner"), None)
+                if existing is not None:
+                    if subghz_emission_n > (existing.get("events_last_hour") or 0):
+                        existing["events_last_hour"] = subghz_emission_n
+                        existing["first_unix"] = subghz_first
+                        existing["last_unix"] = subghz_last
+                elif subghz_emission_n:
+                    scanner_data.append({
+                        "scanner": "subghz_scanner",
+                        "events_last_hour": subghz_emission_n,
+                        "first_unix": subghz_first,
+                        "last_unix": subghz_last,
+                    })
+                entity_summary = conn.execute("""
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN classification = 'anchor' THEN 1 ELSE 0 END) AS anchors,
+                        SUM(CASE WHEN classification = 'satellite' THEN 1 ELSE 0 END) AS satellites,
+                        SUM(CASE WHEN classification = 'known_guest' THEN 1 ELSE 0 END) AS known_guests,
+                        SUM(CASE WHEN classification IS NULL THEN 1 ELSE 0 END) AS unknown,
+                        SUM(CASE WHEN last_seen_unix > ? THEN 1 ELSE 0 END) AS active_now,
+                        SUM(CASE WHEN COALESCE(anomaly_score,0) >= 0.5 AND last_seen_unix > ? THEN 1 ELSE 0 END) AS anomalous_now
+                    FROM entities
+                    WHERE last_seen_unix > ?
+                """, (now - 120, now - 120, now - 7 * 86400)).fetchone()
+                anchor_present = conn.execute(
+                    "SELECT 1 FROM entities WHERE classification = 'anchor' AND last_seen_unix > ? LIMIT 1",
+                    (now - 600,),
+                ).fetchone()
+                any_anchor = conn.execute(
+                    "SELECT 1 FROM entities WHERE classification = 'anchor' LIMIT 1"
+                ).fetchone() is not None
+                unack_alerts = conn.execute(
+                    "SELECT COUNT(*) FROM alerts WHERE acknowledged = 0 AND ts_unix > ?",
+                    (now - 86400,),
+                ).fetchone()[0]
+                baseline_progress = conn.execute(
+                    "SELECT COUNT(DISTINCT (feature || ':' || hour_of_week)) AS buckets, COUNT(DISTINCT feature) AS features FROM baseline_stats"
+                ).fetchone()
+                hp_row = conn.execute(
+                    "SELECT value, updated_unix FROM analytics_state WHERE key = 'honeypot_active_lure'"
+                ).fetchone()
+                honeypot_active = None
+                if hp_row and hp_row[0]:
+                    try:
+                        hpd = json.loads(hp_row[0])
+                        hpd["set_at_unix"] = hpd.get("set_at_unix") or hp_row[1]
+                        honeypot_active = hpd
+                    except Exception:  # noqa: BLE001
+                        pass
+            settings = load_settings(db_path)
+            return (scanner_data, entity_summary, anchor_present, any_anchor,
+                    unack_alerts, baseline_progress, honeypot_active, settings)
+
+        (scanner_data, entity_summary, anchor_present, any_anchor,
+         unack_alerts, baseline_progress, honeypot_active, settings) = await _offload(_query)
 
         if not any_anchor:
             home_state = "unknown"
@@ -422,18 +433,23 @@ class ApiServer:
             "unknown": "classification IS NULL",
             "enrolled": "classification IS NOT NULL",
         }.get(scope, "1=1")
-        with get_connection(self._db) as conn:
-            cursor = conn.execute(f"""
-                SELECT entity_id, scanner, kind, friendly_name, classification,
-                       first_seen_unix, last_seen_unix, visit_count, total_observations,
-                       avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
-                       vendor, is_random_mac
-                FROM entities
-                WHERE {scope_where}
-                ORDER BY {order_sql}
-                LIMIT ?
-            """, (limit,))
-            rows = [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                cursor = conn.execute(f"""
+                    SELECT entity_id, scanner, kind, friendly_name, classification,
+                           first_seen_unix, last_seen_unix, visit_count, total_observations,
+                           avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
+                           vendor, is_random_mac
+                    FROM entities
+                    WHERE {scope_where}
+                    ORDER BY {order_sql}
+                    LIMIT ?
+                """, (limit,))
+                return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+
+        rows = await _offload(_query)
         for r in rows:
             r["seconds_since_seen"] = now - (r["last_seen_unix"] or 0)
             r["currently_present"] = r["seconds_since_seen"] < 120
@@ -622,22 +638,27 @@ class ApiServer:
         })
 
     async def baseline(self, request: web.Request) -> web.Response:
-        with get_connection(self._db) as conn:
-            cursor = conn.execute("""
-                SELECT feature, hour_of_week, n, mean, m2
-                FROM baseline_stats
-                ORDER BY feature, hour_of_week
-            """)
-            rows = []
-            for feature, hw, n, mean, m2 in cursor.fetchall():
-                stddev = (m2 / n) ** 0.5 if n > 1 else 0.0
-                rows.append({
-                    "feature": feature,
-                    "hour_of_week": hw,
-                    "label": _hour_of_week_label(hw),
-                    "n": n, "mean": mean, "stddev": stddev,
-                })
-        # group by feature
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT feature, hour_of_week, n, mean, m2
+                    FROM baseline_stats
+                    ORDER BY feature, hour_of_week
+                """)
+                out = []
+                for feature, hw, n, mean, m2 in cursor.fetchall():
+                    stddev = (m2 / n) ** 0.5 if n > 1 else 0.0
+                    out.append({
+                        "feature": feature,
+                        "hour_of_week": hw,
+                        "label": _hour_of_week_label(hw),
+                        "n": n, "mean": mean, "stddev": stddev,
+                    })
+                return out
+
+        rows = await _offload(_query)
         grouped: dict[str, list] = {}
         for r in rows:
             grouped.setdefault(r["feature"], []).append(r)
@@ -1062,58 +1083,60 @@ class ApiServer:
         from watchtower.apple_continuity import decode_continuity, short_state_summary
         window = max(10, min(900, int(request.query.get("window", "300"))))
         now = int(time.time())
-        with get_connection(self._db) as conn:
-            rows = conn.execute("""
-                SELECT lower(json_extract(features_json, '$.mac')) AS mac,
-                       MAX(json_extract(features_json, '$.manufacturer_data_hex')) AS mfr,
-                       MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS max_rssi,
-                       AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
-                       MIN(ts_unix) AS first_seen,
-                       MAX(ts_unix) AS last_seen,
-                       COUNT(*) AS sightings
-                FROM raw_events
-                WHERE scanner = 'ble_scanner'
-                  AND ts_unix > ?
-                  AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                GROUP BY mac
-                ORDER BY max_rssi DESC NULLS LAST
-                LIMIT 100
-            """, (now - window,)).fetchall()
-            observers = []
-            for mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings in rows:
-                decoded = decode_continuity(mfr or "")
-                observers.append({
-                    "rotating_mac": mac,
-                    "max_rssi": max_rssi,
-                    "avg_rssi": round(avg_rssi, 1) if avg_rssi is not None else None,
-                    "first_seen_unix": first_seen,
-                    "last_seen_unix": last_seen,
-                    "sightings": sightings,
-                    "status": (decoded or {}).get("status"),
-                    "maintained": (decoded or {}).get("maintained"),
-                    "summary": short_state_summary(decoded) if decoded else "",
-                })
+        db_path = self._db
 
-            # Daily presence pattern (last 7 days). This scans the entire
-            # ble_scanner range in raw_events with json_extract per row — slow
-            # enough (3+ seconds) to warrant caching since the result only
-            # changes by ~one bucket every minute.
-            def _compute_daily_presence():
-                day_rows = conn.execute("""
-                    WITH minute_buckets AS (
-                        SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
-                               CAST(ts_unix / 60 AS INTEGER) AS bucket
-                        FROM raw_events
-                        WHERE scanner = 'ble_scanner'
-                          AND ts_unix > strftime('%s','now') - 7 * 86400
-                          AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                        GROUP BY day, bucket
-                    )
-                    SELECT day, COUNT(*) AS minutes_with_findmy
-                    FROM minute_buckets GROUP BY day ORDER BY day DESC
-                """).fetchall()
-                return [{"day": d, "minutes_with_findmy": m} for d, m in day_rows]
-            daily = _cached("findmy_daily_presence", 300.0, _compute_daily_presence)
+        def _query_observers():
+            with get_connection(db_path) as conn:
+                rows = conn.execute("""
+                    SELECT lower(json_extract(features_json, '$.mac')) AS mac,
+                           MAX(json_extract(features_json, '$.manufacturer_data_hex')) AS mfr,
+                           MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS max_rssi,
+                           AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
+                           MIN(ts_unix) AS first_seen,
+                           MAX(ts_unix) AS last_seen,
+                           COUNT(*) AS sightings
+                    FROM raw_events
+                    WHERE scanner = 'ble_scanner'
+                      AND ts_unix > ?
+                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                    GROUP BY mac
+                    ORDER BY max_rssi DESC NULLS LAST
+                    LIMIT 100
+                """, (now - window,)).fetchall()
+                # Daily-presence aggregate is the slow part — keep it cached.
+                def _compute_daily_presence_inner():
+                    day_rows = conn.execute("""
+                        WITH minute_buckets AS (
+                            SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
+                                   CAST(ts_unix / 60 AS INTEGER) AS bucket
+                            FROM raw_events
+                            WHERE scanner = 'ble_scanner'
+                              AND ts_unix > strftime('%s','now') - 7 * 86400
+                              AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                            GROUP BY day, bucket
+                        )
+                        SELECT day, COUNT(*) AS minutes_with_findmy
+                        FROM minute_buckets GROUP BY day ORDER BY day DESC
+                    """).fetchall()
+                    return [{"day": d, "minutes_with_findmy": m} for d, m in day_rows]
+                daily = _cached("findmy_daily_presence", 300.0, _compute_daily_presence_inner)
+                return rows, daily
+
+        rows, daily = await _offload(_query_observers)
+        observers = []
+        for mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings in rows:
+            decoded = decode_continuity(mfr or "")
+            observers.append({
+                "rotating_mac": mac,
+                "max_rssi": max_rssi,
+                "avg_rssi": round(avg_rssi, 1) if avg_rssi is not None else None,
+                "first_seen_unix": first_seen,
+                "last_seen_unix": last_seen,
+                "sightings": sightings,
+                "status": (decoded or {}).get("status"),
+                "maintained": (decoded or {}).get("maintained"),
+                "summary": short_state_summary(decoded) if decoded else "",
+            })
 
         # Group observers by status nibble for quick "owned vs unowned" counts.
         by_status: dict[str, int] = {}
@@ -1135,21 +1158,26 @@ class ApiServer:
         active_only = request.query.get("active_only", "1") == "1"
         now = int(time.time())
         cutoff = now - (3600 if active_only else 7 * 86400)
-        with get_connection(self._db) as conn:
-            cursor = conn.execute("""
-                SELECT c.cluster_id, c.first_seen_unix, c.last_seen_unix,
-                       c.sighting_count, c.rotation_count, c.last_rssi, c.avg_rssi,
-                       c.last_status, c.last_mac, c.classification, c.user_label,
-                       c.inferred_owner_anchor, c.inferred_owner_score, c.notes,
-                       e.friendly_name AS owner_friendly_name
-                FROM findmy_clusters c
-                LEFT JOIN entities e ON e.entity_id = c.inferred_owner_anchor
-                WHERE c.last_seen_unix > ?
-                ORDER BY c.last_seen_unix DESC, c.sighting_count DESC
-                LIMIT 100
-            """, (cutoff,))
-            cols = [c[0] for c in cursor.description]
-            rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT c.cluster_id, c.first_seen_unix, c.last_seen_unix,
+                           c.sighting_count, c.rotation_count, c.last_rssi, c.avg_rssi,
+                           c.last_status, c.last_mac, c.classification, c.user_label,
+                           c.inferred_owner_anchor, c.inferred_owner_score, c.notes,
+                           e.friendly_name AS owner_friendly_name
+                    FROM findmy_clusters c
+                    LEFT JOIN entities e ON e.entity_id = c.inferred_owner_anchor
+                    WHERE c.last_seen_unix > ?
+                    ORDER BY c.last_seen_unix DESC, c.sighting_count DESC
+                    LIMIT 100
+                """, (cutoff,))
+                cols = [c[0] for c in cursor.description]
+                return [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+        rows = await _offload(_query)
         # Add a derived best-guess label for each cluster.
         for r in rows:
             r["display_label"] = (

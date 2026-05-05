@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
+from pathlib import Path
 
 import numpy as np
 
@@ -139,8 +141,45 @@ def _energy_dbm(iq: np.ndarray) -> float:
     return 10.0 * math.log10(p) - 30.0
 
 
+# Frequencies eligible for IQ-capture-on-spike. These are the <1 GHz bands
+# where rtl_433 has protocol decoders (keyfobs, garage doors, weather
+# sensors, TPMS, LoRa, etc.). Midband-only freqs above 1 GHz aren't worth
+# capturing — we have no decoder for them.
+_CAPTURE_ELIGIBLE_HZ: frozenset[int] = frozenset({
+    303_825_000, 315_000_000, 345_000_000, 390_000_000, 418_000_000,
+    433_920_000, 462_500_000, 488_000_000, 868_350_000, 915_000_000,
+})
+
+
+def _save_iq_cu8(samples: np.ndarray, path) -> None:
+    """Write complex64 samples as interleaved uint8 IQ (rtl-sdr's native CU8).
+
+    rtl_433 reads CU8 directly. Each sample becomes 2 bytes (I, Q) in
+    [0, 255] with 128 = zero, matching what `rtl_sdr -` would produce.
+    """
+    s = np.asarray(samples)
+    out = np.empty(s.size * 2, dtype=np.uint8)
+    out[0::2] = np.clip(s.real * 127.5 + 127.5, 0, 255).astype(np.uint8)
+    out[1::2] = np.clip(s.imag * 127.5 + 127.5, 0, 255).astype(np.uint8)
+    out.tofile(path)
+
+
 class MidbandScanner(Scanner):
     name = ScannerName.MIDBAND
+
+    # Capture IQ for offline rtl_433 decode when a sub-GHz freq exceeds its
+    # rolling baseline by this many dB. The observed noise floor is stable
+    # to within ~0.5 dB on the SDRs we use, so 3 dB is a safe trigger that
+    # still catches faint emissions from periodic devices (TPMS, weather
+    # stations, garage tx ACKs) without firing on sweep jitter.
+    SPIKE_THRESHOLD_DB: float = 3.0
+
+    # EMA smoothing for the per-freq baseline. Smaller alpha = slower to
+    # learn; we want stable so a single transient doesn't poison baseline.
+    BASELINE_ALPHA: float = 0.05
+
+    # Cap captures emitted per minute so a noisy front-end can't fill disk.
+    CAPTURE_RATE_LIMIT_PER_MIN: int = 30
 
     def __init__(
         self,
@@ -149,6 +188,8 @@ class MidbandScanner(Scanner):
         dwell_seconds: float = 5.0,
         sample_rate_hz: int = 2_048_000,
         sample_count: int = 256 * 1024,
+        capture_dir: Path | str | None = None,
+        capture_callback=None,  # Callable[[CaptureJob], bool] — return True if accepted
     ) -> None:
         super().__init__()
         self._device_index = device_index
@@ -156,6 +197,60 @@ class MidbandScanner(Scanner):
         self._dwell = dwell_seconds
         self._sample_rate = sample_rate_hz
         self._n = sample_count
+        self._capture_dir = Path(capture_dir) if capture_dir else None
+        self._capture_callback = capture_callback
+        self._baseline: dict[int, float] = {}     # per-freq EMA dBm
+        self._capture_window_start = 0.0
+        self._captures_in_window = 0
+        if self._capture_dir is not None:
+            self._capture_dir.mkdir(parents=True, exist_ok=True)
+
+    def _rate_limit_ok(self) -> bool:
+        now = time.monotonic()
+        if now - self._capture_window_start > 60.0:
+            self._capture_window_start = now
+            self._captures_in_window = 0
+        if self._captures_in_window >= self.CAPTURE_RATE_LIMIT_PER_MIN:
+            return False
+        self._captures_in_window += 1
+        return True
+
+    def _maybe_capture(self, sdr, freq_hz: int) -> bool:
+        """Read an extra IQ window and submit to the offline decoder.
+
+        Most sub-GHz protocols send 50-500 ms packets; the standard 256K
+        samples at 2.048 MS/s is 125 ms, often truncating bursts. We grab
+        another 1024K samples (~500 ms) so most of the burst is captured
+        and rtl_433's per-protocol decoders have enough data.
+        """
+        if not self._rate_limit_ok():
+            return False
+        try:
+            extra = sdr.read_samples(1024 * 1024)
+        except Exception:  # noqa: BLE001
+            log.exception("midband: capture read_samples failed")
+            return False
+        try:
+            ts = int(time.time())
+            path = self._capture_dir / f"{freq_hz}-{ts}-{int(time.monotonic()*1000)%10000:04d}.cu8"
+            _save_iq_cu8(np.asarray(extra, dtype=np.complex64), path)
+        except Exception:  # noqa: BLE001
+            log.exception("midband: capture write failed")
+            return False
+        try:
+            from watchtower.sub_decoder import CaptureJob
+            job = CaptureJob(
+                path=path, freq_hz=freq_hz,
+                sample_rate_hz=self._sample_rate, ts_unix=ts,
+            )
+            return self._capture_callback(job)
+        except Exception:  # noqa: BLE001
+            log.exception("midband: capture submit failed")
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return False
 
     async def run(self) -> None:
         # Outer reconnect loop: if the SDR throws a USB error or the tuner
@@ -200,6 +295,24 @@ class MidbandScanner(Scanner):
                                 raise  # break out to outer loop, reopen device
                             continue
                         label, kind = _label_for_freq(freq)
+
+                        # Trigger an offline-decode capture if the energy at
+                        # this <1 GHz freq spiked above its learned baseline.
+                        # Skip if no capture sink wired up (e.g., test runs).
+                        spiked = False
+                        if (self._capture_callback is not None
+                                and self._capture_dir is not None
+                                and freq in _CAPTURE_ELIGIBLE_HZ):
+                            base = self._baseline.get(freq)
+                            if base is not None and (e_dbm - base) >= self.SPIKE_THRESHOLD_DB:
+                                spiked = self._maybe_capture(sdr, freq)
+                            # Update EMA after the spike check so a real
+                            # spike doesn't immediately raise the baseline.
+                            self._baseline[freq] = (
+                                e_dbm if base is None
+                                else base + self.BASELINE_ALPHA * (e_dbm - base)
+                            )
+
                         ev = Event(
                             scanner=ScannerName.MIDBAND,
                             kind=kind,
@@ -208,7 +321,12 @@ class MidbandScanner(Scanner):
                                 frequency_hz=freq,
                                 energy_dbm=e_dbm,
                             ),
-                            raw={"sample_rate_hz": self._sample_rate, "n": self._n},
+                            raw={
+                                "sample_rate_hz": self._sample_rate,
+                                "n": self._n,
+                                "capture_triggered": spiked,
+                                "baseline_dbm": round(self._baseline.get(freq, e_dbm), 2),
+                            },
                         )
                         await self._emit(ev)
                         try:

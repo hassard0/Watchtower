@@ -23,6 +23,7 @@ from watchtower.scanners.wifi import WifiScanner
 from watchtower.sinks.local import LocalSink
 from watchtower.storage.db import init_db
 from watchtower.storage.pruner import prune_older_than
+from watchtower.sub_decoder import SubDecoder, reap_old_captures
 
 log = logging.getLogger(__name__)
 
@@ -79,12 +80,22 @@ async def _run_async(config_path: Path) -> None:
             rtl_433_args=cfg.scanners.subghz.rtl_433_args,
             device_index=cfg.scanners.subghz.device_index,
         ))
+    # Offline sub-GHz protocol decoder. Midband captures IQ when energy at a
+    # <1 GHz freq spikes; this worker pops those captures and runs rtl_433
+    # against them. Resulting events flow into the same bus as the other
+    # scanners and land in raw_events tagged scanner=subghz_scanner.
+    sub_decoder: SubDecoder | None = None
+    capture_dir = Path(cfg.storage.db_path).parent / "sub_captures"
+    reap_old_captures(capture_dir)
     if cfg.scanners.midband.enabled:
+        sub_decoder = SubDecoder(on_event=lambda ev: bus.publish(ev))
         scanners.append(MidbandScanner(
             device_index=cfg.scanners.midband.device_index,
             sweep_freqs_hz=cfg.scanners.midband.sweep_freqs_hz,
             dwell_seconds=cfg.scanners.midband.dwell_seconds,
             sample_rate_hz=cfg.scanners.midband.sample_rate_hz,
+            capture_dir=capture_dir,
+            capture_callback=sub_decoder.submit,
         ))
 
     for s in scanners:
@@ -107,6 +118,7 @@ async def _run_async(config_path: Path) -> None:
     pruner_task = asyncio.create_task(_pruner_loop(stop, cfg.storage.db_path, cfg.storage.retention_days))
     analytics_task = asyncio.create_task(_analytics_loop(stop, cfg.storage.db_path))
     scanner_tasks = [asyncio.create_task(s.start()) for s in scanners]
+    sub_decoder_task = asyncio.create_task(sub_decoder.run()) if sub_decoder else None
 
     # Active GATT prober — toggle-able via settings.active_probing_enabled.
     pause_factory = (lambda: ble_scanner.pause_for_probe()) if ble_scanner else None
@@ -146,7 +158,12 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
-    for t in (pruner_task, analytics_task, prober_task, honeypot_task, findmy_task):
+    if sub_decoder is not None:
+        await sub_decoder.stop()
+    tasks_to_cancel = [pruner_task, analytics_task, prober_task, honeypot_task, findmy_task]
+    if sub_decoder_task is not None:
+        tasks_to_cancel.append(sub_decoder_task)
+    for t in tasks_to_cancel:
         t.cancel()
         try:
             await t

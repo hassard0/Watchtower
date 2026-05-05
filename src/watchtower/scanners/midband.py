@@ -80,9 +80,21 @@ DEFAULT_SWEEP_FREQS_HZ: list[int] = [
 
 
 def _label_for_freq(freq_hz: int) -> tuple[str, EventKind]:
+    """Return the narrowest matching band so specific allocations (ISM-433,
+    Keyfob-315) win over the broader allocations they overlap (Amateur-70cm,
+    Mil-Aero-UHF). Without this, 433.92 MHz keyfobs get tagged
+    cellular_band_energy and 315 MHz remotes get aviation_band_energy.
+    """
+    best: tuple[str, EventKind] | None = None
+    best_width = float("inf")
     for low, high, label, kind in _BAND_LABELS:
         if low <= freq_hz <= high:
-            return label, kind
+            width = high - low
+            if width < best_width:
+                best = (label, kind)
+                best_width = width
+    if best is not None:
+        return best
     return "OutOfBand", EventKind.CELLULAR_BAND_ENERGY
 
 

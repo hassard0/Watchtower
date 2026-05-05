@@ -27,6 +27,21 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Tiny in-memory cache for expensive aggregate queries. Each entry is keyed
+# by name and holds (computed_at_unix, value). Reads beyond TTL recompute.
+_query_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str, ttl_sec: float, compute):
+    """Memoize the result of `compute()` for `ttl_sec` seconds."""
+    now = time.time()
+    hit = _query_cache.get(key)
+    if hit and (now - hit[0]) < ttl_sec:
+        return hit[1]
+    value = compute()
+    _query_cache[key] = (now, value)
+    return value
+
 
 def _row_to_dict(cursor, row) -> dict[str, Any]:
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
@@ -1046,21 +1061,26 @@ class ApiServer:
                     "summary": short_state_summary(decoded) if decoded else "",
                 })
 
-            # Daily presence pattern (last 7 days), same query the rule uses.
-            day_rows = conn.execute("""
-                WITH minute_buckets AS (
-                    SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
-                           CAST(ts_unix / 60 AS INTEGER) AS bucket
-                    FROM raw_events
-                    WHERE scanner = 'ble_scanner'
-                      AND ts_unix > strftime('%s','now') - 7 * 86400
-                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                    GROUP BY day, bucket
-                )
-                SELECT day, COUNT(*) AS minutes_with_findmy
-                FROM minute_buckets GROUP BY day ORDER BY day DESC
-            """).fetchall()
-            daily = [{"day": d, "minutes_with_findmy": m} for d, m in day_rows]
+            # Daily presence pattern (last 7 days). This scans the entire
+            # ble_scanner range in raw_events with json_extract per row — slow
+            # enough (3+ seconds) to warrant caching since the result only
+            # changes by ~one bucket every minute.
+            def _compute_daily_presence():
+                day_rows = conn.execute("""
+                    WITH minute_buckets AS (
+                        SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
+                               CAST(ts_unix / 60 AS INTEGER) AS bucket
+                        FROM raw_events
+                        WHERE scanner = 'ble_scanner'
+                          AND ts_unix > strftime('%s','now') - 7 * 86400
+                          AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                        GROUP BY day, bucket
+                    )
+                    SELECT day, COUNT(*) AS minutes_with_findmy
+                    FROM minute_buckets GROUP BY day ORDER BY day DESC
+                """).fetchall()
+                return [{"day": d, "minutes_with_findmy": m} for d, m in day_rows]
+            daily = _cached("findmy_daily_presence", 300.0, _compute_daily_presence)
 
         # Group observers by status nibble for quick "owned vs unowned" counts.
         by_status: dict[str, int] = {}

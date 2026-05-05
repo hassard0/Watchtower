@@ -14,13 +14,23 @@ def _load_schema_sql() -> str:
 
 @contextmanager
 def get_connection(db_path: Path | str) -> Iterator[sqlite3.Connection]:
-    """Yield a SQLite connection with PRAGMAs set sensibly for the daemon."""
+    """Yield a SQLite connection with PRAGMAs set sensibly for the daemon.
+
+    The DB grows to several hundred MB inside a day from BLE adv volume, so
+    each fresh connection without a healthy page cache + memory map made
+    /api/entities and /api/findmy/* take ~2.7 s — blocking the asyncio loop.
+    The mmap_size + cache_size pragmas push that down by an order of magnitude
+    by letting the kernel/page-cache do most of the read work.
+    """
     conn = sqlite3.connect(str(db_path), isolation_level=None)  # autocommit
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA cache_size = -65536")   # 64 MB page cache
+        conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB memory map
+        conn.execute("PRAGMA temp_store = MEMORY")
         yield conn
     finally:
         conn.close()

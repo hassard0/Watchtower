@@ -21,6 +21,17 @@ sudo systemctl enable bluetooth.service NetworkManager.service ssh.service 2>&1 
 echo "[+] Adding 'admin' to bluetooth group (requires re-login to take effect)..."
 sudo usermod -aG bluetooth admin || true
 
+echo "[+] Installing bt-hci1-up unit (auto-up for an optional USB BT adapter)..."
+# Idempotent: only installs if the unit file is missing or has changed.
+# The unit no-ops on systems without an hci1 device, so it's safe to enable
+# unconditionally.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/bt-hci1-up.service" ]; then
+  sudo install -m 644 "$SCRIPT_DIR/bt-hci1-up.service" /etc/systemd/system/bt-hci1-up.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable bt-hci1-up.service 2>&1 | tail -1 || true
+fi
+
 echo "[+] Blacklisting kernel DVB driver (else rtl-sdr can't claim USB)..."
 sudo tee /etc/modprobe.d/blacklist-rtl.conf >/dev/null <<'EOF'
 blacklist dvb_usb_rtl28xxu

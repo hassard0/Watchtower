@@ -1,0 +1,25 @@
+[Unit]
+# Bring up an external USB Bluetooth radio (hci1) before watchtower starts,
+# unblocking it from rfkill if needed. Used when the operator has plugged a
+# higher-gain or BT-6.0 USB BT adapter into the Pi and wants the BLE scanner
+# to use it instead of the on-board Cypress radio (hci0). watchtower.toml's
+# `[scanners.ble] adapter = "hci1"` selects which adapter the scanner attaches
+# to; hci0 stays available for the Find-My broadcaster and honeypot, which
+# both ride on bluetoothctl's default controller.
+Description=Bring up the USB Bluetooth radio (hci1) for watchtower scanner
+After=bluetooth.service
+Wants=bluetooth.service
+Before=watchtower.service
+
+[Service]
+Type=oneshot
+# rfkill blocks USB BT adapters by default on Pi OS — unblock first.
+ExecStartPre=/usr/sbin/rfkill unblock bluetooth
+# Wait up to 15s for the kernel to enumerate the device, then bring it up.
+# Returns success either way, so the unit no-ops cleanly on Pis that
+# don't have a second BT adapter plugged in.
+ExecStart=/bin/sh -c "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do /usr/bin/hciconfig hci1 >/dev/null 2>&1 && /usr/bin/hciconfig hci1 up && exit 0; sleep 1; done; exit 0"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

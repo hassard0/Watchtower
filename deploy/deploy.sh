@@ -28,8 +28,12 @@ ssh "$USER_@$HOST" "test -f /etc/watchtower/watchtower.toml || \
   sudo cp $APP_DIR/config/watchtower.example.toml /etc/watchtower/watchtower.toml; \
   sudo chown $USER_:$USER_ /etc/watchtower/watchtower.toml"
 
-echo "[+] installing systemd unit"
+echo "[+] installing systemd units"
 ssh "$USER_@$HOST" "sudo cp $APP_DIR/deploy/$SVC /etc/systemd/system/$SVC && \
+  if [ -f $APP_DIR/deploy/bt-hci1-up.service ]; then \
+    sudo cp $APP_DIR/deploy/bt-hci1-up.service /etc/systemd/system/bt-hci1-up.service; \
+    sudo systemctl enable bt-hci1-up.service 2>&1 | tail -1 || true; \
+  fi; \
   sudo systemctl daemon-reload && \
   sudo systemctl enable $SVC"
 

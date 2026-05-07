@@ -14,6 +14,12 @@ format = "json"
 
 [scanners.ble]
 enabled = true
+# "hci0" is the Pi's built-in Cypress radio (BT 5.0). If you've plugged
+# in a USB BT adapter for better range/sensitivity (e.g. Realtek BT 6.0
+# at 0bda:a760), set this to "hci1" — and enable bt-hci1-up.service
+# (deploy/bt-hci1-up.service) so the adapter comes up at boot. hci0
+# stays available for the Find-My broadcaster + honeypot, which both
+# ride bluetoothctl's default controller.
 adapter = "hci0"
 
 [scanners.wifi]

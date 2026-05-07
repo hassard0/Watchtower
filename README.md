@@ -119,8 +119,9 @@ The reference build that everything is tested against:
 | **Wide-band SDR** (device 1) | Nooelec SMArTee XTR v5 (E4000 tuner) | $40 | E4000 reaches up to 2.2 GHz so the same sweep loop that reads ISM bands also covers ADS-B (1090 MHz), GPS L1 (1575 MHz), GLONASS (1602 MHz), and weather satellite downlinks |
 | **Antennas** | 2× telescoping dipole (e.g. NESDR Bargain 2) | $30 | Adjustable for the 4× wavelength range we cover. Best results come from extending the antenna to ~λ/4 of the band you care about most (~17 cm for 433 MHz). |
 | **Powered USB hub** *(optional but recommended)* | Anker 4-port USB 3.0 powered hub | $30 | Decouples the SDRs' inrush current from the Pi's own rail and lets the Pi sit further from antenna interference |
+| **USB Bluetooth 6.0 adapter** *(optional)* | Realtek `0bda:a760` BT 6.0 dongle with external antenna | $25-40 | The Pi's onboard Cypress radio is BT 5.0 and uses an internal PCB antenna; a BT 6.0 USB stick with an external antenna noticeably extends the BLE detection range. Bring it up as `hci1`; the BLE scanner can be pointed at it via `[scanners.ble] adapter = "hci1"`. The onboard hci0 stays available for the Find-My broadcaster + honeypot. See `deploy/bt-hci1-up.service`. |
 | **Enclosure** | Pi 5 case with active cooling fan + cutouts for two USB extensions | $25 | The CPU runs ≈55 °C continuously; passive cases throttle |
-| **Total** | | **~$330** | |
+| **Total** | | **~$330** (+$25-40 with the BT 6.0 dongle) | |
 
 Notes:
 
@@ -138,12 +139,20 @@ Notes:
 
 ## What each radio does
 
-### BLE scanner (`hci0`)
+### BLE scanner (`hci0` by default, configurable)
 
 Passive scan via [bleak](https://github.com/hbldh/bleak) with a
 detection callback that fires on every advertisement. Per-event we
 extract MAC, RSSI, advertised name, manufacturer-data hex, and
 service UUIDs.
+
+The adapter is selected by `[scanners.ble] adapter` in
+`watchtower.toml`. `"hci0"` is the Pi's onboard Cypress radio; if you
+plug in a USB BT 6.0 adapter for better range, set this to `"hci1"`
+and enable `bt-hci1-up.service` (in `deploy/`) so the adapter comes
+up at boot. The onboard `hci0` stays available for the Find-My
+broadcaster + honeypot, both of which use bluetoothctl's default
+controller.
 
 Crucial extras:
 

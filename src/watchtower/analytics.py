@@ -140,7 +140,7 @@ def _dispatch_external(settings: dict, alert_payload: dict) -> None:
                             "Title": f"Watchtower · {rule_id}",
                             "Priority": str(priority_map.get(severity, 3)),
                             "Tags": tag_map.get(severity, "warning"),
-                            "Click": "http://watchtower.local:8080/",
+                            "Click": "http://watchtower.local/",
                         },
                     )
                     urllib.request.urlopen(req, timeout=4)

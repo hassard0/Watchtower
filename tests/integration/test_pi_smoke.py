@@ -28,6 +28,20 @@ def test_service_active(pi_host: str):
     assert out.strip() == "active"
 
 
+def test_dashboard_served_on_port_80(pi_host: str):
+    out = _ssh(
+        pi_host,
+        "curl --fail --silent --show-error --output /dev/null "
+        "--write-out '%{http_code}' http://127.0.0.1/",
+    )
+    assert out.strip() == "200"
+
+
+def test_wifi_recovery_timer_active(pi_host: str):
+    out = _ssh(pi_host, "systemctl is-active watchtower-wifi-reconnect.timer")
+    assert out.strip() == "active"
+
+
 def test_service_logs_scanners_started(pi_host: str):
     # Fetch enough lines to capture the current invocation's start record.
     # systemd always records "Started watchtower.service" when the unit
@@ -45,7 +59,7 @@ def test_db_exists_and_has_schema(pi_host: str):
         "sqlite3 -readonly -cmd '.timeout 5000' "
         "/var/lib/watchtower/watchtower.db 'SELECT version FROM schema_meta;'",
     )
-    assert out.strip() == "3"  # schema v3 adds zones + probe_captures
+    assert out.strip() == "5"  # current schema includes Find-My ownership tables
 
 
 def _sqlite_count(host: str, scanner: str) -> int:

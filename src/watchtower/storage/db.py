@@ -22,12 +22,16 @@ def get_connection(db_path: Path | str) -> Iterator[sqlite3.Connection]:
     The mmap_size + cache_size pragmas push that down by an order of magnitude
     by letting the kernel/page-cache do most of the read work.
     """
-    conn = sqlite3.connect(str(db_path), isolation_level=None)  # autocommit
+    conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=15.0)  # autocommit
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        # Setting journal_mode on every short-lived connection competes with
+        # active writers. Only change it when bootstrapping a non-WAL DB.
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(mode).lower() != "wal":
+            conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA busy_timeout = 15000")
         conn.execute("PRAGMA cache_size = -65536")   # 64 MB page cache
         conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB memory map
         conn.execute("PRAGMA temp_store = MEMORY")

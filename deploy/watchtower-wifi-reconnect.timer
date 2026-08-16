@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically retry Watchtower Wi-Fi connections
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=60s
+RandomizedDelaySec=10s
+AccuracySec=5s
+Persistent=true
+Unit=watchtower-wifi-reconnect.service
+
+[Install]
+WantedBy=timers.target

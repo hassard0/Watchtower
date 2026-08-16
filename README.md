@@ -12,7 +12,7 @@ don't belong to anyone in the family.
 
 It is **standalone** (no cloud, no internet required), runs as a
 single systemd-supervised Python process, and exposes a real-time
-dashboard at `http://watchtower.local:8080` plus a separate mobile
+dashboard at `http://watchtower.local` plus a separate mobile
 calibration page at `/probe`.
 
 ---
@@ -96,7 +96,7 @@ DETECTION     7 declarative rules, all toggleable + tunable from the dashboard.
               Each fires an Alert with structured evidence.
 
 OUTPUT        SQLite (WAL mode, 64 MB cache, 256 MB mmap) with hourly pruner
-              aiohttp /api/* + static SPA at port 8080
+              aiohttp /api/* + static SPA at port 80
               optional ntfy push, generic webhook, and MQTT publish per alert
 ```
 
@@ -312,7 +312,7 @@ dashboard banner color and (when configured) the ntfy push priority.
 
 ---
 
-## The dashboard at `:8080`
+## The dashboard on port 80
 
 | Tab | What you see |
 | --- | --- |
@@ -432,7 +432,26 @@ systemctl is-active watchtower
 sudo journalctl -u watchtower -f
 ```
 
-Open `http://watchtower.local:8080` in a browser.
+Open `http://watchtower.local` in a browser.
+
+### Network and boot recovery
+
+Deployment installs `watchtower-wifi-reconnect.timer`. Once a minute, while
+`wlan0` is disconnected, it unblocks the radio and tries every saved
+NetworkManager Wi-Fi profile. Saved profiles retry indefinitely and Wi-Fi
+power saving is disabled. On first install, if NetworkManager has no Wi-Fi
+profiles, the installer migrates Raspberry Pi Imager's root-only
+`/boot/firmware/network-config` into netplan without copying credentials into
+this repository.
+
+Add further known networks with:
+
+```bash
+sudo nmcli device wifi connect "SSID" password "PASSWORD" ifname wlan0
+```
+
+The main service retries indefinitely at 15-second intervals after a failure,
+each radio scanner restarts independently after a transient failure, and SQLite-locked event batches are queued for retry rather than discarded.
 
 ### First-run flow
 

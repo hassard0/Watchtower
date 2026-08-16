@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -63,10 +64,27 @@ class LocalSink(Sink):
             return
         rows, self._buf = self._buf, []
         try:
-            with get_connection(self._db) as conn:
-                conn.executemany(_INSERT_SQL, rows)
+            await asyncio.to_thread(self._write_rows, rows)
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                # A busy analytics pass should delay capture persistence, not
+                # lose observations. Preserve ordering and retry next flush.
+                self._buf = rows + self._buf
+                log.exception("local sink flush deferred; %d events queued for retry", len(rows))
+            else:
+                log.exception("local sink flush failed; %d events lost", len(rows))
         except Exception:  # noqa: BLE001
             log.exception("local sink flush failed; %d events lost", len(rows))
+
+    def _write_rows(self, rows: list[tuple]) -> None:
+        with get_connection(self._db) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.executemany(_INSERT_SQL, rows)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def _periodic_flush(self) -> None:
         try:

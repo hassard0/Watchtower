@@ -1,7 +1,7 @@
 """HTTP API + dashboard server.
 
 Embedded in the watchtower process as an asyncio task. Listens on
-0.0.0.0:8080 by default. Serves:
+0.0.0.0:80 by default. Serves:
   - JSON API at /api/*
   - Static SPA dashboard at /
   - Mobile probe UI at /probe
@@ -91,7 +91,7 @@ def _hour_of_week_label(hw: int) -> str:
 
 
 class ApiServer:
-    def __init__(self, db_path: Path | str, host: str = "0.0.0.0", port: int = 8080) -> None:
+    def __init__(self, db_path: Path | str, host: str = "0.0.0.0", port: int = 80) -> None:
         self._db = Path(db_path)
         self._host = host
         self._port = port

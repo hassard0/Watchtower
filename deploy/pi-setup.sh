@@ -70,4 +70,9 @@ fi
 EOF
 sudo chmod 0644 /etc/profile.d/watchtower-admin-path.sh
 
+echo "[+] Installing durable Wi-Fi recovery..."
+if [ -f "$SCRIPT_DIR/install-wifi-recovery.sh" ]; then
+  bash "$SCRIPT_DIR/install-wifi-recovery.sh"
+fi
+
 echo "[+] Done. Verify with: rtl_test -t (must reload modules / reboot if blacklist was new)"

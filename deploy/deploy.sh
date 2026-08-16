@@ -37,6 +37,9 @@ ssh "$USER_@$HOST" "sudo cp $APP_DIR/deploy/$SVC /etc/systemd/system/$SVC && \
   sudo systemctl daemon-reload && \
   sudo systemctl enable $SVC"
 
+echo "[+] installing durable Wi-Fi recovery"
+ssh "$USER_@$HOST" "bash $APP_DIR/deploy/install-wifi-recovery.sh"
+
 echo "[+] (re)starting service"
 ssh "$USER_@$HOST" "sudo systemctl restart $SVC"
 sleep 3

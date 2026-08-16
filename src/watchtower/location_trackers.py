@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 DULT_SERVICE_UUID = "fcb2"
+FIND_HUB_SERVICE_UUID = "feaa"
 TILE_SERVICE_UUIDS = {"fd84", "feec", "feed"}
 DULT_NETWORKS = {
     0x01: "apple",
@@ -48,6 +49,28 @@ def detect_location_tracker(
     services = {short_uuid(value) for value in (service_uuids or [])}
     service_data = _normalized_service_data(service_data_hex)
     mfr = (manufacturer_data_hex or "").lower()
+
+    # Google Find Hub Network frames use FEAA service data. Frame 0x41 is the
+    # explicit unwanted-tracking-protection/separated state; 0x40 is normal
+    # network beaconing. EIDs remain encrypted and are not treated as names.
+    fhn_hex = service_data.get(FIND_HUB_SERVICE_UUID, "")
+    try:
+        fhn = bytes.fromhex(fhn_hex)
+    except ValueError:
+        fhn = b""
+    if len(fhn) in {21, 22, 33, 34} and fhn[0] in {0x40, 0x41}:
+        protection = fhn[0] == 0x41
+        return {
+            "family": "google_findhub",
+            "label": "Google Find Hub-compatible tracker",
+            "provider": "google",
+            "near_owner": None,
+            "separated": protection,
+            "status": "unwanted-tracking-protection" if protection else "network-beaconing",
+            "confidence": "high",
+            "alert_eligible": True,
+            "protocol_evidence": f"Google Find Hub FEAA frame 0x{fhn[0]:02X}",
+        }
 
     # Current cross-platform Detecting Unwanted Location Trackers broadcast.
     if DULT_SERVICE_UUID in services or DULT_SERVICE_UUID in service_data:

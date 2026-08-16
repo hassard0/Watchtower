@@ -71,6 +71,30 @@ def _mfr_data_to_hex(data: dict[int, bytes]) -> str | None:
     return "".join(parts)
 
 
+def _encrypted_ad_data(platform_data: Any) -> list[str]:
+    """Extract raw AD type 0x31 exposed by Bleak's BlueZ backend.
+
+    Bleak intentionally normalizes only common AD types. BlueZ retains the
+    remaining types in Device1.AdvertisingData, available through
+    AdvertisementData.platform_data as ``(object_path, properties)``.
+    """
+    try:
+        props = platform_data[1]
+        advertising = props.get("AdvertisingData", {})
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return []
+    out: list[str] = []
+    for key, value in getattr(advertising, "items", lambda: [])():
+        try:
+            ad_type = int(getattr(key, "value", key))
+            raw = getattr(value, "value", value)
+            if ad_type == 0x31:
+                out.append(bytes(raw).hex())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 class BleScanner(Scanner):
     name = ScannerName.BLE
 
@@ -135,6 +159,7 @@ class BleScanner(Scanner):
                 services = list(adv.service_uuids or [])
                 service_data = {str(k): v.hex() for k, v in (adv.service_data or {}).items()}
                 mfr_hex = _mfr_data_to_hex(adv.manufacturer_data or {})
+                ead_hex = _encrypted_ad_data(getattr(adv, "platform_data", ()))
                 local_name = adv.local_name or device.name
                 # Dedupe key: same MAC + same advertisement content.
                 # RSSI is excluded so RSSI fluctuations don't bypass dedup;
@@ -173,6 +198,7 @@ class BleScanner(Scanner):
                     service_uuids=services,
                     service_data_hex=service_data,
                     manufacturer_data_hex=mfr_hex,
+                    encrypted_ad_data_hex=ead_hex,
                     local_name=local_name,
                     decoded=decoded,
                 )
@@ -190,6 +216,7 @@ class BleScanner(Scanner):
                         "manufacturer_data": {
                             str(k): v.hex() for k, v in (adv.manufacturer_data or {}).items()
                         },
+                        "encrypted_ad_data": ead_hex,
                     },
                 )
                 # Schedule async emit from sync callback context.

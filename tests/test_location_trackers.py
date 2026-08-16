@@ -38,6 +38,13 @@ def test_tile_company_identifier_is_recognized():
     assert "0x067C" in found["protocol_evidence"]
 
 
+def test_google_find_hub_protection_frame_is_recognized():
+    found = detect_location_tracker(None, [], {"feaa": "41" + "11" * 20}, None)
+    assert found["family"] == "google_findhub"
+    assert found["separated"] is True
+    assert "0x41" in found["protocol_evidence"]
+
+
 def test_legacy_findmy_does_not_overclaim_airtag_model():
     found = detect_location_tracker(None, [], {}, "4c00121900" + "00" * 20)
     assert found["family"] == "apple_findmy"

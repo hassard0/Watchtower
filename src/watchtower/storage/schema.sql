@@ -228,6 +228,22 @@ CREATE INDEX IF NOT EXISTS idx_findmy_catalog_pubkey ON findmy_key_catalog(pubke
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_mac ON findmy_key_catalog(expected_mac);
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_slot ON findmy_key_catalog(slot_start_unix);
 
--- Set schema version to 7 (friendly-name candidates + provenance).
-DELETE FROM schema_meta WHERE version < 7;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (7);
+-- v8: encrypted, local-only key vault.  secret_ciphertext is always a
+-- Fernet token; the master key is stored separately with mode 0600.
+CREATE TABLE IF NOT EXISTS name_decryption_keys (
+    key_id             TEXT PRIMARY KEY,
+    label              TEXT NOT NULL,
+    key_type           TEXT NOT NULL CHECK (key_type IN ('ble_ead', 'fast_pair_account', 'ble_irk')),
+    scope              TEXT NOT NULL DEFAULT '*',
+    secret_ciphertext  TEXT NOT NULL,
+    metadata_json      TEXT NOT NULL DEFAULT '{}',
+    created_unix       INTEGER NOT NULL,
+    last_used_unix     INTEGER,
+    enabled            INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_name_decryption_keys_type
+    ON name_decryption_keys(key_type, enabled);
+
+-- Set schema version to 8 (authorized friendly-name decryption vault).
+DELETE FROM schema_meta WHERE version < 8;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (8);

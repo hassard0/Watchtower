@@ -16,6 +16,7 @@ from watchtower.honeypot import Honeypot
 from watchtower.bus import Bus
 from watchtower.config import load_config
 from watchtower.logging_setup import setup_logging
+from watchtower.local_discovery import LocalIdentityDiscovery
 from watchtower.scanners.base import Scanner
 from watchtower.scanners.ble import BleScanner
 from watchtower.scanners.midband import MidbandScanner
@@ -148,8 +149,15 @@ async def _run_async(config_path: Path) -> None:
     )
     findmy_task = asyncio.create_task(findmy_tracker.run(stop))
 
+    identity_discovery = LocalIdentityDiscovery(
+        cfg.storage.db_path, settings_getter=lambda: load_settings(cfg.storage.db_path),
+        pause_scanner_factory=pause_factory,
+    )
+    identity_task = asyncio.create_task(identity_discovery.run(stop))
+
     api = ApiServer(cfg.storage.db_path, host=cfg.api.host, port=cfg.api.port)
     api.set_findmy_tracker(findmy_tracker)
+    api.set_ble_adapter(cfg.scanners.ble.adapter)
     api.set_pause_scanner_factory(pause_factory)
     await api.start()
 
@@ -166,7 +174,7 @@ async def _run_async(config_path: Path) -> None:
             pass
     if sub_decoder is not None:
         await sub_decoder.stop()
-    tasks_to_cancel = [pruner_task, analytics_task, prober_task, honeypot_task, findmy_task]
+    tasks_to_cancel = [pruner_task, analytics_task, prober_task, honeypot_task, findmy_task, identity_task]
     if sub_decoder_task is not None:
         tasks_to_cancel.append(sub_decoder_task)
     for t in tasks_to_cancel:

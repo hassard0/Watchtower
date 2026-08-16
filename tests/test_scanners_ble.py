@@ -6,6 +6,12 @@ import pytest
 
 from watchtower.events import EventKind, Scanner as ScannerName
 from watchtower.scanners.ble import BleScanner
+from watchtower.scanners.ble import _encrypted_ad_data
+
+
+def test_extracts_bluez_encrypted_advertising_data():
+    assert _encrypted_ad_data(("/org/bluez/hci0/dev_x", {"AdvertisingData": {0x31: b"\x01\x02"}})) == ["0102"]
+    assert _encrypted_ad_data(()) == []
 
 
 def _fake_device(address: str = "aa:bb:cc:dd:ee:ff", name: str | None = "iPhone"):

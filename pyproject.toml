@@ -18,6 +18,7 @@ dependencies = [
     "paho-mqtt>=2.0",
     "cryptography>=42",
     "mac-vendor-lookup>=0.1.13",
+    "zeroconf>=0.132",
 ]
 
 [project.scripts]

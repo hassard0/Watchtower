@@ -36,6 +36,11 @@ function watchtower() {
     wifiConnectSecurity: 'wpa2',
     wifiPassword: '',
     wifiMessage: '',
+    nameKeys: [],
+    bluetoothDevices: [],
+    identityBusy: false,
+    identityMessage: '',
+    identityKey: { label: '', key_type: 'fast_pair_account', scope: '*', secret: '' },
     recap: null,
     recapHours: 8,
     toasts: [],
@@ -412,6 +417,103 @@ function watchtower() {
         if (this.wifiToken) sessionStorage.setItem('watchtower.wifiToken', this.wifiToken.trim());
         else sessionStorage.removeItem('watchtower.wifiToken');
       } catch (e) {}
+    },
+
+    adminHeaders(json = false) {
+      const headers = {};
+      if (json) headers['Content-Type'] = 'application/json';
+      if (this.wifiToken.trim()) headers['X-Watchtower-Admin-Token'] = this.wifiToken.trim();
+      return headers;
+    },
+
+    async loadIdentity(includeDevices = true) {
+      if (!this.wifiToken.trim()) {
+        this.identityMessage = 'Enter the setup token above to unlock local identity controls.';
+        return;
+      }
+      this.identityBusy = true;
+      try {
+        const requests = [fetch('/api/name-keys', {headers: this.adminHeaders()})];
+        if (includeDevices) requests.push(fetch('/api/bluetooth/devices', {headers: this.adminHeaders()}));
+        const responses = await Promise.all(requests);
+        const keys = await responses[0].json();
+        if (!responses[0].ok) throw new Error(keys.error || 'Could not open key vault');
+        this.nameKeys = keys.keys || [];
+        if (responses[1]) {
+          const bt = await responses[1].json();
+          if (!responses[1].ok) throw new Error(bt.error || 'Bluetooth is unavailable');
+          this.bluetoothDevices = bt.devices || [];
+        }
+        this.identityMessage = `Loaded ${this.nameKeys.length} authorized key(s) and ${this.bluetoothDevices.length} Bluetooth device(s).`;
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async addIdentityKey() {
+      this.identityBusy = true;
+      try {
+        const r = await fetch('/api/name-keys', {
+          method: 'POST', headers: this.adminHeaders(true), body: JSON.stringify(this.identityKey),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Key import failed');
+        this.identityKey.secret = '';
+        this.identityKey.label = '';
+        await this.loadIdentity(false);
+        this.identityMessage = 'Key encrypted locally and ready for authorized name resolution.';
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async deleteIdentityKey(key) {
+      if (!confirm(`Delete local key “${key.label}”? Names already recorded remain auditable.`)) return;
+      this.identityBusy = true;
+      try {
+        const r = await fetch('/api/name-keys/' + encodeURIComponent(key.key_id), {
+          method: 'DELETE', headers: this.adminHeaders(),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Delete failed');
+        await this.loadIdentity(false);
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async scanBluetooth() {
+      this.identityBusy = true;
+      this.identityMessage = 'Running bounded Bluetooth Classic inquiry and remote-name resolution…';
+      try {
+        const r = await fetch('/api/bluetooth/scan', {method: 'POST', headers: this.adminHeaders(true), body: '{}'});
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Bluetooth scan failed');
+        this.bluetoothDevices = j.devices || [];
+        this.identityMessage = `Bluetooth scan complete: ${this.bluetoothDevices.length} cached or nearby device(s).`;
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async pairBluetooth(device) {
+      if (!confirm(`Pair with ${device.alias || device.name || device.address}? Put your device in pairing mode first.`)) return;
+      await this.identityDeviceAction('/api/bluetooth/pair', device, 'Pairing');
+    },
+
+    async decryptFastPairName(device) {
+      await this.identityDeviceAction('/api/bluetooth/fast-pair-name', device, 'Fast Pair name request');
+    },
+
+    async identityDeviceAction(path, device, label) {
+      this.identityBusy = true;
+      this.identityMessage = label + ' in progress…';
+      try {
+        const r = await fetch(path, {method: 'POST', headers: this.adminHeaders(true),
+          body: JSON.stringify({address: device.address})});
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || `${label} failed`);
+        this.identityMessage = j.name ? `Authenticated personalized name: ${j.name}` :
+          `Paired successfully${j.ead_key_imported ? '; EAD key material encrypted in the local vault' : ''}.`;
+        await this.loadIdentity(true);
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
     },
 
     async loadWifi(rescan) {

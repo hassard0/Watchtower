@@ -1,9 +1,8 @@
 """Confidence-scored, local-only friendly-name resolution.
 
-This module does not decrypt protected identifiers.  It normalizes names a
-device voluntarily exposes through BLE GAP/GATT, Wi-Fi WPS/SSID metadata, or
-known public protocol signatures, records their provenance, and selects the
-best candidate without overwriting an explicit user label.
+This module normalizes disclosed names plus names decrypted with explicitly
+authorized local keys, records provenance, and selects the best candidate
+without overwriting an explicit user label.
 """
 from __future__ import annotations
 
@@ -16,7 +15,16 @@ from typing import Any
 
 SOURCE_CONFIDENCE: dict[str, float] = {
     "user": 1.00,
+    "fast_pair_personalized_name": 0.995,
+    "ble_ead_local_name": 0.99,
+    "bluez_paired_alias": 0.985,
+    "ble_irk_identity": 0.98,
     "ble_gatt_device_name": 0.96,
+    "bluetooth_remote_name": 0.93,
+    "mdns_service_name": 0.92,
+    "upnp_friendly_name": 0.92,
+    "dhcp_hostname": 0.86,
+    "reverse_dns": 0.75,
     "signature": 0.94,
     "wifi_wps_device_name": 0.90,
     "ble_gatt_model": 0.84,
@@ -193,6 +201,9 @@ def candidates_from_features(scanner: str, feats: dict[str, Any]) -> list[tuple[
     if scanner == "ble_scanner":
         if feats.get("local_name"):
             out.append((feats["local_name"], "ble_advertised_name", {}))
+        for item in decoded.get("authorized_names") or []:
+            if isinstance(item, dict) and item.get("name") and item.get("source"):
+                out.append((item["name"], item["source"], item.get("evidence") or {}))
         detection = decoded.get("device_detection") or {}
         if detection.get("device_signature") == "flipper_zero":
             out.append(("Flipper Zero", "signature", {"detector": "ble_signature"}))

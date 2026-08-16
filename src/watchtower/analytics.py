@@ -25,6 +25,7 @@ from ulid import ULID
 
 from watchtower.storage.db import get_connection
 from watchtower.name_resolution import candidates_from_features, record_name_candidate
+from watchtower.name_crypto import NameKeyVault, decrypt_ead, local_name_from_ad, resolve_rpa
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ DEFAULT_SETTINGS = {
     "anomaly_severity_medium_threshold": 0.4,
     # M3+ extensions:
     "active_probing_enabled": False,         # GATT probe to fetch friendly names
+    "classic_name_discovery_enabled": True,  # BR/EDR remote names + paired BlueZ aliases
+    "lan_name_discovery_enabled": True,      # mDNS/DNS-SD, UPnP, DHCP, reverse DNS
     "honeypot_enabled": False,                # rotating BLE lure broadcaster
     "honeypot_rotate_minutes": 30,            # cycle through lure list every N min
     "findmy_tracker_enabled": False,          # broadcast as a Find-My-compatible AirTag
@@ -219,6 +222,9 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
     mac = features.get("mac")
     if not mac:
         return None
+    authorized_identity = (features.get("decoded") or {}).get("authorized_identity") or {}
+    if authorized_identity.get("key_id"):
+        return f"ble:irk:{authorized_identity['key_id']}"
     tracker = (features.get("decoded") or {}).get("location_tracker") or {}
     if tracker.get("alert_eligible"):
         family = tracker.get("family") or "unknown"
@@ -354,6 +360,37 @@ class Analytics:
 
     def __init__(self, db_path: Path | str) -> None:
         self._db = Path(db_path)
+        self._name_vault = NameKeyVault(self._db)
+
+    def _apply_authorized_name_crypto(self, feats: dict[str, Any], keys) -> set[str]:
+        """Attach authenticated name/identity evidence; return used key IDs."""
+        used: set[str] = set()
+        if not isinstance(feats.get("decoded"), dict):
+            feats["decoded"] = {}
+        decoded = feats["decoded"]
+        names = decoded.setdefault("authorized_names", [])
+        mac = str(feats.get("mac") or "").lower()
+        for key in keys:
+            scope = key.scope.lower()
+            if scope not in {"*", mac, f"ble:mac:{mac}"} and not scope.startswith("ble:irk:"):
+                continue
+            if key.key_type == "ble_irk" and mac and resolve_rpa(mac, key.secret):
+                decoded["authorized_identity"] = {"key_id": key.key_id, "label": key.label}
+                names.append({"name": key.label, "source": "ble_irk_identity",
+                              "evidence": {"key_id": key.key_id, "authenticated": True}})
+                used.add(key.key_id)
+            elif key.key_type == "ble_ead":
+                for encoded in feats.get("encrypted_ad_data_hex") or []:
+                    try:
+                        plain = decrypt_ead(bytes.fromhex(encoded), key.secret[:16], key.secret[16:])
+                        name = local_name_from_ad(plain)
+                    except (ValueError, TypeError):
+                        continue
+                    if name:
+                        names.append({"name": name, "source": "ble_ead_local_name",
+                                      "evidence": {"key_id": key.key_id, "authenticated": True}})
+                        used.add(key.key_id)
+        return used
 
     def _get_state(self, conn, key: str, default: str) -> str:
         row = conn.execute("SELECT value FROM analytics_state WHERE key = ?", (key,)).fetchone()
@@ -368,6 +405,12 @@ class Analytics:
 
     def step(self) -> dict[str, Any]:
         """Run one roll-up pass. Returns summary stats."""
+        try:
+            authorized_keys = self._name_vault.enabled()
+        except Exception:  # noqa: BLE001
+            log.exception("name_crypto: unable to load authorized keys")
+            authorized_keys = []
+        used_keys: set[str] = set()
         with get_connection(self._db) as conn:
             last_id = self._get_state(conn, "rollup_last_event_id", "")
             cutoff_unix = int(time.time()) - 7 * 86400  # only last 7d
@@ -395,6 +438,8 @@ class Analytics:
 
             for event_id, ts_unix, scanner, kind, feats_json in rows:
                 feats = json.loads(feats_json) if feats_json else {}
+                if scanner == "ble_scanner" and authorized_keys:
+                    used_keys.update(self._apply_authorized_name_crypto(feats, authorized_keys))
                 hw = _hour_of_week(ts_unix)
                 scanner_hour_counts[(scanner, hw)] += 1
 
@@ -626,6 +671,11 @@ class Analytics:
             # Update watermark.
             last_seen_id = rows[-1][0]
             self._set_state(conn, "rollup_last_event_id", last_seen_id)
+            if used_keys:
+                conn.executemany(
+                    "UPDATE name_decryption_keys SET last_used_unix=? WHERE key_id=?",
+                    [(now, key_id) for key_id in used_keys],
+                )
 
             return {
                 "processed": len(rows),

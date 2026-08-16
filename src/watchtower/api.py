@@ -22,6 +22,15 @@ from ulid import ULID
 from watchtower.active_probe import probe_one, _apply_probe_result
 from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
 from watchtower.name_resolution import candidates_for_entity, set_user_name
+from watchtower.name_crypto import KeyVaultError, NameKeyVault
+from watchtower.bluetooth_identity import (
+    fetch_fast_pair_name,
+    ingest_bluez_devices,
+    list_bluez_devices,
+    pair_device,
+    read_ead_key_material,
+    scan_classic,
+)
 from watchtower.storage.db import get_connection
 from watchtower.wifi import (
     WifiError,
@@ -154,6 +163,15 @@ class ApiServer:
         self._app.router.add_post("/api/wifi/connect", self.wifi_connect)
         self._app.router.add_post("/api/wifi/forget", self.wifi_forget)
         self._app.router.add_get("/api/wifi/results/{request_id}", self.wifi_result)
+        # Authorized local identity/decryption controls. All routes require
+        # the same root-owned setup token as Wi-Fi mutations.
+        self._app.router.add_get("/api/name-keys", self.name_keys_list)
+        self._app.router.add_post("/api/name-keys", self.name_keys_add)
+        self._app.router.add_delete("/api/name-keys/{key_id}", self.name_keys_delete)
+        self._app.router.add_get("/api/bluetooth/devices", self.bluetooth_devices)
+        self._app.router.add_post("/api/bluetooth/scan", self.bluetooth_scan)
+        self._app.router.add_post("/api/bluetooth/pair", self.bluetooth_pair)
+        self._app.router.add_post("/api/bluetooth/fast-pair-name", self.bluetooth_fast_pair_name)
         # Admin / database tools
         self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
         self._app.router.add_post("/api/admin/test-ntfy", self.admin_test_ntfy)
@@ -173,6 +191,8 @@ class ApiServer:
         self._stopping = False
         self._pause_scanner_factory = None
         self._findmy_tracker = None
+        self._ble_adapter = "hci0"
+        self._name_vault = NameKeyVault(self._db)
 
     def set_pause_scanner_factory(self, factory) -> None:
         """Inject a coordinator so on-demand probes can pause the BLE scanner."""
@@ -181,6 +201,9 @@ class ApiServer:
     def set_findmy_tracker(self, tracker) -> None:
         """Inject the FindMyTracker so /api/findmy can expose the keypair."""
         self._findmy_tracker = tracker
+
+    def set_ble_adapter(self, adapter: str) -> None:
+        self._ble_adapter = adapter
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app, access_log=None)
@@ -1131,6 +1154,123 @@ class ApiServer:
         except (WifiError, json.JSONDecodeError, AttributeError) as exc:
             status = 409 if "already in progress" in str(exc) else 400
             return self._wifi_error(str(exc), status)
+
+    # ---- AUTHORIZED NAME KEYS + BLUETOOTH ----
+
+    @staticmethod
+    def _admin_authorized(request: web.Request) -> bool:
+        return token_valid(request.headers.get("X-Watchtower-Admin-Token"))
+
+    async def name_keys_list(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        return web.json_response({"keys": await _offload(self._name_vault.list_public)})
+
+    async def name_keys_add(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            metadata = body.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise KeyVaultError("metadata must be an object")
+            key = await _offload(
+                self._name_vault.add,
+                label=body.get("label"), key_type=body.get("key_type"),
+                secret_hex=body.get("secret"), scope=body.get("scope") or "*",
+                metadata=metadata,
+            )
+            return web.json_response({"ok": True, "key": key}, status=201)
+        except (KeyVaultError, json.JSONDecodeError, AttributeError) as exc:
+            return self._wifi_error(str(exc), 400)
+
+    async def name_keys_delete(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        deleted = await _offload(self._name_vault.delete, request.match_info["key_id"])
+        return web.json_response({"ok": True, "deleted": deleted})
+
+    async def bluetooth_devices(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            devices = await _offload(list_bluez_devices)
+            await _offload(ingest_bluez_devices, self._db, devices)
+            return web.json_response({"devices": devices})
+        except RuntimeError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def bluetooth_scan(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    devices = await _offload(scan_classic, 10)
+            else:
+                devices = await _offload(scan_classic, 10)
+            await _offload(ingest_bluez_devices, self._db, devices)
+            return web.json_response({"ok": True, "devices": devices})
+        except RuntimeError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def bluetooth_pair(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            address = str(body.get("address") or "").upper()
+            device = await _offload(pair_device, address)
+            await _offload(ingest_bluez_devices, self._db, [device])
+            # If the paired device authorizes EAD key-material reads, store it
+            # directly in the encrypted vault without returning it to the API.
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    material = await read_ead_key_material(address, self._ble_adapter)
+            else:
+                material = await read_ead_key_material(address, self._ble_adapter)
+            imported = False
+            if material:
+                self._name_vault.add(
+                    label=f"{device.get('alias') or device.get('name') or address} EAD",
+                    key_type="ble_ead", secret_hex=material.hex(), scope=address,
+                    metadata={"source": "authenticated_pairing", "address": address},
+                )
+                imported = True
+            return web.json_response({"ok": True, "device": device, "ead_key_imported": imported})
+        except (ValueError, RuntimeError, json.JSONDecodeError, KeyVaultError) as exc:
+            return self._wifi_error(str(exc), 400)
+
+    async def bluetooth_fast_pair_name(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            address = str(body.get("address") or "").upper()
+            keys = self._name_vault.enabled("fast_pair_account")
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    name, key_id = await fetch_fast_pair_name(address, keys, self._ble_adapter)
+            else:
+                name, key_id = await fetch_fast_pair_name(address, keys, self._ble_adapter)
+            now = int(time.time())
+            eid = f"ble:mac:{address.lower()}"
+            with get_connection(self._db) as conn:
+                conn.execute(
+                    """INSERT INTO entities(entity_id,scanner,kind,first_seen_unix,last_seen_unix,visit_count,total_observations,is_random_mac)
+                       VALUES (?,'ble_scanner','ble_device',?,?,0,1,0)
+                       ON CONFLICT(entity_id) DO UPDATE SET last_seen_unix=excluded.last_seen_unix""",
+                    (eid, now, now),
+                )
+                record_name_candidate(
+                    conn, eid, name, "fast_pair_personalized_name",
+                    evidence={"key_id": key_id, "authenticated": True, "address": address},
+                )
+            self._name_vault.mark_used(key_id)
+            return web.json_response({"ok": True, "entity_id": eid, "name": name,
+                                      "source": "fast_pair_personalized_name"})
+        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            return self._wifi_error(str(exc), 400)
 
     async def wifi_result(self, request: web.Request) -> web.Response:
         try:

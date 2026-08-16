@@ -168,11 +168,19 @@ Crucial extras:
   `standards-oui.ieee.org`) at `/var/lib/watchtower/oui-cache.txt`.
   Stable-MAC entities self-identify as "eero inc.", "Espressif",
   "Samsung", "Sagemcom", "TP-Link" etc. without any active probing.
-- **Local friendly-name resolver** — advertised BLE names, standardized
-  GATT Device Name/model fields, Wi-Fi WPS metadata, SSIDs, and verified
-  protocol signatures are retained as confidence-scored candidates. The UI
-  shows the winning name's provenance; an explicit user label always wins.
-  Protected identity data is never cracked or guessed.
+- **Local friendly-name resolver** — advertised BLE names, Bluetooth Classic
+  Remote Name results, trusted BlueZ aliases, standardized GATT Device
+  Name/model fields, Wi-Fi WPS metadata, SSIDs, mDNS/DNS-SD, UPnP, DHCP, and
+  reverse DNS are retained as confidence-scored candidates. The UI shows the
+  winning name's provenance; an explicit user label always wins.
+- **Authorized name decryption** — the Settings gear accepts keys from
+  devices you own: Bluetooth Encrypted Advertising Data session key + IV,
+  Bluetooth IRKs, and Google Fast Pair account keys. EAD names are decrypted
+  passively with AES-CCM; IRKs resolve rotating private addresses; Fast Pair
+  personalized names are accepted only after the protocol HMAC verifies.
+  Keys are Fernet-encrypted with a separate mode-0600 master key at
+  `/var/lib/watchtower/name-vault.key`; APIs never return secret material.
+  No key guessing or brute force is implemented.
 - **GATT prober** — when enabled, the prober briefly pauses the passive
   scan and tries a polite GATT connection to read public *Device Name*,
   manufacturer, and model characteristics. Devices that require pairing
@@ -242,11 +250,13 @@ coverage from a single SDR**.
 
 ### Unwanted location-tracker listener and clustering
 
-The passive BLE scanner recognizes three protocol-backed families:
+The passive BLE scanner recognizes four protocol-backed families:
 
 - legacy Apple Find My manufacturer data (`0x4C 0x00 0x12`);
 - Tile-assigned service UUIDs (`0xFD84`, `0xFEEC`, `0xFEED`) and
   Tile's Bluetooth company ID (`0x067C`);
+- Google Find Hub `0xFEAA` frames, including the explicit `0x41`
+  unwanted-tracking-protection state;
 - the cross-platform Detecting Unwanted Location Trackers service-data
   UUID (`0xFCB2`), including network provider and near-owner/separated state.
 
@@ -262,9 +272,28 @@ The cluster tracker:
   of each individual cluster. Unrelated neighbors' devices cannot combine
   into one persistent-tracker alert.
 
-Apple/Tile owner identifiers are deliberately protected. Watchtower does not
-claim to decrypt a stranger's identity; use iOS/Android unwanted-tracker
-alerts for the authorized physical-identification and disablement flow.
+Apple/Tile owner labels are not present in their radio advertisements.
+Watchtower therefore does not claim to decrypt a stranger's identity; use
+iOS/Android unwanted-tracker alerts for the authorized physical-identification
+and disablement flow. User-owned tracker catalog labels remain supported.
+
+### Local identity controls
+
+Open **Settings → Friendly names & authorized decryption**, enter the setup
+token, then load devices. From there you can:
+
+- run a bounded Bluetooth Classic inquiry and import Remote Name results;
+- explicitly pair an owned device, enabling BlueZ identity resolution and
+  trusted aliases and importing EAD key material when the authenticated
+  characteristic permits it;
+- import a 16-byte Fast Pair account key and request the device's personalized
+  name, a 24-byte EAD session-key/IV bundle, or a 16-byte Bluetooth IRK;
+- enable or disable automatic Classic and LAN friendly-name discovery.
+
+The key label is only a local description. A decrypted name is promoted only
+after AES-CCM or Fast Pair HMAC authentication succeeds; an IRK identity is
+promoted only after its address hash resolves. Removing a key stops future
+decryption while retaining past name evidence for auditability.
 
 ### Find-My owned-tracker catalog
 
@@ -539,13 +568,15 @@ Settings UI (toggleable from the dashboard at runtime):
 - Honeypot enable + rotation cadence
 - Find-My tracker broadcaster enable
 - Local BLE name-resolution probing enable
+- Bluetooth Classic remote-name discovery and LAN mDNS/UPnP/DHCP enrichment
+- Encrypted EAD / Fast Pair / IRK key management for owned devices
 
 ---
 
 ## Roadmap
 
-- **v1.5 (next)** — UPS HAT support, ntfy push routing, heartbeat /
-  watchdog, tamper detection, and broader local DNS-SD/mDNS enrichment
+- **v1.5 (next)** — UPS HAT support, heartbeat / watchdog, tamper detection,
+  and stronger multi-sensor tracker co-travel scoring
 - **v2** — vulcan (or other) cloud sink for cold-tier storage, ML
   training pipeline using user feedback as labels, Hailo-8L NPU for
   on-device autoencoder anomaly scoring
@@ -578,11 +609,14 @@ src/watchtower/
 ├── findmy_tracker.py       # Pi-as-AirTag broadcaster
 ├── honeypot.py             # rotating BLE lure + connection log
 ├── active_probe.py         # GATT probe for unknown devices
+├── name_crypto.py          # EAD/Fast Pair/IRK crypto + encrypted key vault
+├── bluetooth_identity.py   # BlueZ names, pairing, authorized key/name reads
+├── local_discovery.py      # mDNS/DNS-SD, UPnP, DHCP, reverse-DNS names
 ├── oui.py                  # IEEE OUI registry loader (≈50 k prefixes)
 ├── analytics.py            # enrichment + rules + alert dispatch
 ├── api.py                  # aiohttp HTTP server + JSON API + cache warmer
 ├── storage/
-│   ├── schema.sql          # v5 schema
+│   ├── schema.sql          # v8 schema
 │   ├── db.py               # connection helper with PRAGMA tuning
 │   └── pruner.py           # retention pruner
 └── static/
@@ -590,7 +624,7 @@ src/watchtower/
     ├── probe.html          # mobile site-survey page
     └── assets/app.js       # ~1 k LOC dashboard logic
 
-tests/                      # 67 passing unit tests, 8 integration tests
+tests/                      # unit tests plus 8 Raspberry Pi integration tests
 deploy/                     # systemd unit + pi-setup.sh + deploy.sh
 docs/superpowers/           # design specs and milestone plans
 ```

@@ -48,6 +48,7 @@ DEFAULT_SETTINGS = {
     "rule_close_unknown_signal": True,
     "rule_rogue_hotspot": True,
     "rule_honeypot_engaged": True,
+    "rule_flipper_zero_detected": True,
     "rule_findmy_persistent_tracker": True,
     "findmy_persistent_min_minutes_per_day": 180,
     "findmy_persistent_min_consecutive_days": 3,
@@ -241,11 +242,13 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
     if scanner == "ble_scanner":
         return _ble_entity_id(ev_features, scanner, kind)
     if scanner == "subghz_scanner":
+        from watchtower.rf_identity import stable_subghz_identity
         proto = ev_features.get("protocol")
         decoded = ev_features.get("decoded") or {}
-        ident = decoded.get("id") or decoded.get("rolling_code") or decoded.get("button_id") or "unknown"
         if not proto:
             return None
+        stable = stable_subghz_identity(decoded)
+        ident = stable[1] if stable else "unknown"
         return f"subghz:{proto}:{ident}"
     if scanner == "wifi_scanner":
         mac = ev_features.get("mac")
@@ -264,6 +267,9 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
 
 def _classify_entity_kind(scanner: str, kind: str, features: dict) -> str:
     if scanner == "ble_scanner":
+        detection = (features.get("decoded") or {}).get("device_detection") or {}
+        if detection.get("device_signature") == "flipper_zero":
+            return "ble_flipper_zero"
         services = features.get("service_uuids") or []
         if any(uuid in services for uuid in ("fd6f",)):
             return "ble_findmy"
@@ -426,6 +432,12 @@ class Analytics:
                                 )
                         except Exception:  # noqa: BLE001
                             log.exception("findmy: cluster processing failed")
+                elif scanner == "subghz_scanner":
+                    from watchtower.rf_identity import subghz_summary
+                    e["identification_summary"] = subghz_summary(
+                        feats.get("protocol") or "unknown",
+                        feats.get("decoded") or {},
+                    )
                 rssi_int = None
                 rssi = feats.get("rssi")
                 if rssi is not None:
@@ -446,7 +458,7 @@ class Analytics:
                 avg = sum(rssis) / len(rssis) if rssis else None
                 lo = min(rssis) if rssis else None
                 hi = max(rssis) if rssis else None
-                continuity_state = e.get("continuity_state")
+                continuity_state = e.get("continuity_state") or e.get("identification_summary")
                 conn.execute("""
                     INSERT INTO entities (
                         entity_id, scanner, kind, first_seen_unix, last_seen_unix,
@@ -894,6 +906,33 @@ class Analytics:
                 "severity": severity, "entity_id": entity_id, "score": score,
                 "home_state": home_state, "evidence": evidence,
             })
+
+        # ---- Flipper Zero BLE signature ----
+        # Alert only on the official name + official serial-service pair. A
+        # name-only or UUID-only match remains visible as medium-confidence
+        # metadata but is deliberately too weak to page the user.
+        if S.get("rule_flipper_zero_detected", True):
+            flippers = conn.execute(
+                """SELECT json_extract(features_json, '$.local_name') AS local_name,
+                          MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS rssi
+                   FROM raw_events
+                   WHERE scanner = 'ble_scanner'
+                     AND ts_unix > ?
+                     AND json_extract(features_json, '$.decoded.device_detection.device_signature') = 'flipper_zero'
+                     AND json_extract(features_json, '$.decoded.device_detection.alert_eligible') = 1
+                   GROUP BY local_name""",
+                (recent_threshold,),
+            ).fetchall()
+            for local_name, rssi in flippers:
+                entity_id = f"ble:named:{local_name}" if local_name else None
+                _fire("flipper_zero_detected", "high", entity_id, 0.9, {
+                    "device": "Flipper Zero",
+                    "confidence": "high",
+                    "local_name": local_name,
+                    "rssi": rssi,
+                    "evidence": "official BLE name format and serial-service UUID",
+                    "limitation": "BLE identifies a nearby compatible advertisement; it does not prove who operated it or attribute sub-GHz traffic.",
+                })
 
         # ---- Rule 1: anchor_absent_unknown_linger ----
         # Only meaningful if we know who's home — i.e., at least one anchor enrolled.

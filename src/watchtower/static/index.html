@@ -164,6 +164,11 @@ tailwind.config = {
           <path d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>
         </svg>
       </button>
+      <button @click="switchTab('settings'); $nextTick(() => loadWifi(true))" title="Settings and Wi-Fi"
+              class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition"
+              :class="tab === 'settings' && 'border-signal-glow/50 text-signal-glow'">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
       <button @click="refresh()" class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition" :class="loading && 'animate-spin'">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
       </button>
@@ -1159,6 +1164,90 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- WI-FI -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Connectivity</div>
+            <div class="text-base font-semibold">Wi-Fi networks</div>
+            <div class="text-[11px] text-slate-500 mt-1" x-show="wifi.current">
+              Connected to <span class="text-signal-pulse font-medium" x-text="wifi.current?.ssid"></span>
+              <span class="num" x-text="` · ${wifi.current?.signal || 0}%`"></span>
+            </div>
+            <div class="text-[11px] text-signal-warm mt-1" x-show="!wifi.current">Wi-Fi is not currently connected.</div>
+          </div>
+          <button @click="loadWifi(true)" :disabled="wifiLoading"
+                  class="px-3 py-1.5 rounded-md border border-signal-glow/40 text-signal-glow text-xs disabled:opacity-40">
+            <span x-text="wifiLoading ? 'scanning…' : 'scan again'"></span>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Networks in range</div>
+            <div class="space-y-1 max-h-64 overflow-y-auto scrollbar pr-1">
+              <template x-for="network in wifi.networks" :key="network.ssid + ':' + network.security">
+                <button @click="chooseWifi(network)" class="w-full flex items-center gap-3 rounded-lg px-3 py-2 border text-left transition"
+                        :class="wifiConnectSsid === network.ssid ? 'border-signal-glow/50 bg-signal-glow/10' : 'border-ink-600/30 bg-ink-700/20 hover:border-ink-600'">
+                  <div class="w-9 text-xs num" :class="network.signal >= 60 ? 'text-signal-pulse' : network.signal >= 35 ? 'text-signal-warm' : 'text-slate-500'" x-text="network.signal + '%' "></div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm truncate" x-text="network.ssid"></div>
+                    <div class="text-[10px] text-slate-500" x-text="network.security === 'open' ? 'Open network' : network.security_label"></div>
+                  </div>
+                  <span x-show="network.connected" class="text-[9px] uppercase text-signal-pulse">connected</span>
+                </button>
+              </template>
+              <div x-show="!wifiLoading && !(wifi.networks || []).length" class="text-xs text-slate-500 py-5 text-center">No networks found.</div>
+            </div>
+          </div>
+
+          <form @submit.prevent="connectWifi()" class="space-y-3">
+            <div>
+              <label class="text-[10px] uppercase tracking-wider text-slate-500">SSID</label>
+              <input type="text" maxlength="32" required x-model="wifiConnectSsid" placeholder="Select above or type a hidden SSID"
+                     class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] uppercase tracking-wider text-slate-500">Security</label>
+                <select x-model="wifiConnectSecurity" class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-2 py-2 text-sm">
+                  <option value="wpa2">WPA2</option><option value="wpa3">WPA3</option><option value="open">Open</option>
+                </select>
+              </div>
+              <div class="col-span-2" x-show="wifiConnectSecurity !== 'open'">
+                <label class="text-[10px] uppercase tracking-wider text-slate-500">Wi-Fi password</label>
+                <input type="password" minlength="8" maxlength="63" :required="wifiConnectSecurity !== 'open'" autocomplete="new-password" x-model="wifiPassword"
+                       class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+              </div>
+            </div>
+            <div>
+              <label class="text-[10px] uppercase tracking-wider text-slate-500">Setup token</label>
+              <input type="password" autocomplete="off" x-model="wifiToken" @change="saveWifiToken()" placeholder="One-time token from the Pi"
+                     class="mt-1 w-full font-mono bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+              <div class="text-[10px] text-slate-500 mt-1">Stored only in this browser tab. Retrieve once with <span class="font-mono">cat /etc/watchtower/wifi-admin.token</span>.</div>
+            </div>
+            <button type="submit" :disabled="wifiBusy || !wifiConnectSsid || !wifiToken"
+                    class="w-full px-3 py-2 rounded-md bg-signal-pulse text-ink-900 text-sm font-semibold disabled:opacity-40">
+              <span x-text="wifiBusy ? 'applying change…' : 'connect and remember'"></span>
+            </button>
+            <div class="text-xs rounded-md px-3 py-2 bg-ink-700/30" x-show="wifiMessage" x-text="wifiMessage"></div>
+          </form>
+        </div>
+
+        <div class="mt-4" x-show="(wifi.saved || []).length">
+          <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Remembered networks</div>
+          <div class="flex flex-wrap gap-2">
+            <template x-for="profile in wifi.saved" :key="profile.uuid">
+              <div class="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-ink-700/30 border border-ink-600/30 text-xs">
+                <span x-text="profile.ssid || profile.name"></span>
+                <span x-show="profile.active" class="text-[9px] text-signal-pulse uppercase">active</span>
+                <button x-show="!profile.active" @click="forgetWifi(profile)" class="text-threat hover:underline">forget</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
       <!-- THRESHOLDS -->
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection thresholds</div>
@@ -1182,7 +1271,7 @@ tailwind.config = {
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection rules</div>
         <div class="space-y-2">
-          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_findmy_persistent_tracker','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged']" :key="key">
+          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_findmy_persistent_tracker','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged','rule_flipper_zero_detected']" :key="key">
             <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
               <input type="checkbox" x-model="settings[key]" @change="settingsDirty = true"
                      class="w-4 h-4 mt-0.5 rounded accent-signal-pulse">

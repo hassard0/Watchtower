@@ -58,6 +58,7 @@ class SubGhzCfg:
         "-F", "json", "-d", "0",
         "-M", "stats:1:60",  # periodic stats record so a quiet RF environment is distinguishable from a stuck tuner
         "-M", "level",       # signal level on every event
+        "-M", "protocol",    # stable rtl_433 decoder number for historical correlation
     ])
 
 

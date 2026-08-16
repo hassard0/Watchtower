@@ -6,6 +6,8 @@ import pytest
 
 from watchtower.events import EventKind, Scanner as ScannerName
 from watchtower.scanners.subghz import SubGhzScanner, _line_to_event
+from watchtower.analytics import _entity_id_for
+from watchtower.rf_identity import stable_subghz_identity, subghz_identification_metadata
 
 
 def test_keyfob_line_to_event():
@@ -23,6 +25,8 @@ def test_keyfob_line_to_event():
     assert ev.features.frequency_hz == 433_920_000
     assert ev.features.protocol == "Honda-CarRemote"
     assert ev.features.decoded["id"] == "0x123ABC"
+    assert ev.features.decoded["_watchtower"]["encrypted_or_rolling"] is True
+    assert ev.features.local_name == "Honda-CarRemote"
 
 
 def test_garage_line_to_event():
@@ -57,6 +61,22 @@ def test_non_decoded_status_line_returns_none():
     # rtl_433 sometimes emits status messages — ignore them.
     line = json.dumps({"app": "rtl_433", "version": "23.11"})
     assert _line_to_event(line) is None
+
+
+def test_rolling_code_is_never_used_as_entity_identity():
+    decoded = {"rolling_code": "changes-every-press", "button_id": "unlock"}
+    assert stable_subghz_identity(decoded) is None
+    features = {"protocol": "Secure-Keyfob", "decoded": decoded}
+    assert _entity_id_for(features, "subghz_scanner", "keyfob_emission") == \
+        "subghz:Secure-Keyfob:unknown"
+
+
+def test_stable_id_is_used_while_rolling_code_is_metadata_only():
+    decoded = {"id": "0x123", "rolling_code": "0x999", "mic": "CRC"}
+    assert stable_subghz_identity(decoded) == ("id", "0x123")
+    metadata = subghz_identification_metadata(decoded)
+    assert metadata["stable_identity_value"] == "0x123"
+    assert metadata["protected_or_volatile_fields"] == ["mic", "rolling_code"]
 
 
 async def test_subghz_scanner_consumes_subprocess_lines(monkeypatch):

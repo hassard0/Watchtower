@@ -28,6 +28,14 @@ function watchtower() {
     settings: {},
     settingsSchema: {},
     settingsDirty: false,
+    wifi: { current: null, networks: [], saved: [] },
+    wifiLoading: false,
+    wifiBusy: false,
+    wifiToken: '',
+    wifiConnectSsid: '',
+    wifiConnectSecurity: 'wpa2',
+    wifiPassword: '',
+    wifiMessage: '',
     recap: null,
     recapHours: 8,
     toasts: [],
@@ -84,6 +92,7 @@ function watchtower() {
         const saved = localStorage.getItem('watchtower.tab');
         if (saved && this.tabs.find(t => t.id === saved)) this.tab = saved;
       } catch (e) {}
+      try { this.wifiToken = sessionStorage.getItem('watchtower.wifiToken') || ''; } catch (e) {}
       this.$watch('tab', v => {
         try { localStorage.setItem('watchtower.tab', v); } catch (e) {}
       });
@@ -110,6 +119,7 @@ function watchtower() {
         if (tab === 'findmy')    tasks.push(this.loadFindmy());
         if (tab === 'overview')  tasks.push(this.loadRecap());
         if (tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
+        if (tab === 'settings') tasks.push(this.loadWifi(false));
         await Promise.all(tasks);
         this.tabsLoaded = { ...this.tabsLoaded, [tab]: true };
       } finally {
@@ -397,6 +407,111 @@ function watchtower() {
       } catch (e) { alert('save failed: ' + e.message); }
     },
 
+    saveWifiToken() {
+      try {
+        if (this.wifiToken) sessionStorage.setItem('watchtower.wifiToken', this.wifiToken.trim());
+        else sessionStorage.removeItem('watchtower.wifiToken');
+      } catch (e) {}
+    },
+
+    async loadWifi(rescan) {
+      if (this.wifiLoading) return;
+      this.wifiLoading = true;
+      try {
+        const r = await this._fetch('/api/wifi?rescan=' + (rescan ? '1' : '0'), rescan ? 25000 : 8000);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Wi-Fi status unavailable');
+        this.wifi = j;
+        if (!this.wifiConnectSsid && j.current?.ssid) {
+          this.wifiConnectSsid = j.current.ssid;
+          this.wifiConnectSecurity = j.current.security || 'wpa2';
+        }
+        this.wifiMessage = rescan ? `Found ${(j.networks || []).length} networks.` : this.wifiMessage;
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiLoading = false;
+      }
+    },
+
+    chooseWifi(network) {
+      this.wifiConnectSsid = network.ssid;
+      this.wifiConnectSecurity = network.security || 'wpa2';
+      this.wifiPassword = '';
+      this.wifiMessage = '';
+    },
+
+    async wifiMutation(path, body) {
+      this.saveWifiToken();
+      if (!this.wifiToken.trim()) throw new Error('Enter the Wi-Fi setup token first.');
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Watchtower-Admin-Token': this.wifiToken.trim(),
+        },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+      return j;
+    },
+
+    async pollWifiResult(requestId) {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          const r = await this._fetch('/api/wifi/results/' + encodeURIComponent(requestId), 4000);
+          const j = await r.json();
+          if (r.status === 202 || j.pending) continue;
+          if (!j.ok) throw new Error(j.error || 'NetworkManager could not apply the change.');
+          return j;
+        } catch (e) {
+          if (attempt >= 39) throw e;
+          // A Wi-Fi transition can briefly interrupt this browser connection.
+        }
+      }
+      throw new Error('Timed out waiting for NetworkManager. Reload Watchtower after the Pi reconnects.');
+    },
+
+    async connectWifi() {
+      if (this.wifiBusy) return;
+      this.wifiBusy = true;
+      this.wifiMessage = `Connecting to ${this.wifiConnectSsid}…`;
+      try {
+        const queued = await this.wifiMutation('/api/wifi/connect', {
+          ssid: this.wifiConnectSsid,
+          security: this.wifiConnectSecurity,
+          password: this.wifiPassword,
+        });
+        const result = await this.pollWifiResult(queued.request_id);
+        this.wifiPassword = '';
+        this.wifiMessage = `Connected to ${result.ssid}.`;
+        await this.loadWifi(true);
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiBusy = false;
+      }
+    },
+
+    async forgetWifi(profile) {
+      if (profile.active || this.wifiBusy) return;
+      if (!confirm(`Forget saved Wi-Fi network “${profile.ssid || profile.name}”?`)) return;
+      this.wifiBusy = true;
+      this.wifiMessage = `Forgetting ${profile.ssid || profile.name}…`;
+      try {
+        const queued = await this.wifiMutation('/api/wifi/forget', { uuid: profile.uuid });
+        await this.pollWifiResult(queued.request_id);
+        this.wifiMessage = 'Saved network removed.';
+        await this.loadWifi(true);
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiBusy = false;
+      }
+    },
+
     settingsLabel(key) {
       return ({
         'linger_threshold_sec': 'Linger threshold',
@@ -434,6 +549,7 @@ function watchtower() {
         'rule_close_unknown_signal':         'Strong-signal unknown nearby',
         'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
         'rule_honeypot_engaged':             'Honeypot lure engaged',
+        'rule_flipper_zero_detected':        'Flipper Zero detected',
       })[key] || key;
     },
     ruleDescription(key) {
@@ -447,6 +563,7 @@ function watchtower() {
         'rule_close_unknown_signal':         'Mobile BLE device with very strong RSSI and recurring presence.',
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
         'rule_honeypot_engaged':             'Fires when a device connects to one of our honeypot lures (Tesla key, smart lock, etc.).',
+        'rule_flipper_zero_detected':        'High-confidence match on the official Flipper BLE name and serial-service UUID. Does not attribute unrelated sub-GHz traffic.',
       })[key] || '';
     },
     findmyKey: null,

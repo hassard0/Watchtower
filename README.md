@@ -57,12 +57,14 @@ The thing Watchtower is designed to catch:
 | Rogue mobile hotspot used as a staging point | Random-BSSID Wi-Fi AP with strong signal that *isn't* on the home network |
 | Visitor under-the-radar at unusual hours | First-time entity arriving inside the configured **after-hours window** |
 | Active probing of decoy devices | Outbound BLE GATT connection attempts to the Pi's **honeypot lures** |
+| Nearby Flipper Zero | High-confidence match on the official firmware's BLE name plus serial-service UUID |
 
 Out of scope (and explicitly *not* implemented):
 
 - Cellular IMSI catching or anything else illegal in most jurisdictions
 - Decryption / cracking of rolling codes — we detect *that* a code was
-  emitted, not *what* the code is
+  emitted, retain lawful decoder metadata, and group it by any exposed stable
+  device ID; changing codes, MICs, and opaque payloads are never treated as identity
 - Capturing audio / video / network content
 - Tracking residents or guests they've consented to (anchors and
   satellites are intentionally exempted from most rules once enrolled)
@@ -306,6 +308,7 @@ take effect immediately without restart.
 | `close_unknown_signal` | Unknown BLE entity with avg RSSI > `close_perimeter_rssi_dbm` (default −50 dBm) and recurring presence (skips stationary IoT) |
 | `rogue_hotspot` | Wi-Fi AP with locally-administered (random) BSSID and strong signal — the smell test for a phone hotspot or rogue access point near the property |
 | `honeypot_engaged` | Inbound GATT connection to the Pi's lure name |
+| `flipper_zero_detected` | Official `Flipper <device-name>` BLE format and 0x3080–0x3083 serial-service UUID appear together. Name-only matches are informational to avoid easy spoofing |
 
 Severity is one of `critical / high / medium / low` and drives the
 dashboard banner color and (when configured) the ntfy push priority.
@@ -411,7 +414,7 @@ uv sync
 uv run pytest -v
 ```
 
-44 unit tests + 6 integration tests (skipped unless
+67 unit tests + 8 integration tests (skipped unless
 `WATCHTOWER_PI_HOST` is set). Mock-driven; doesn't require hardware.
 
 ### Deploy to the Pi
@@ -444,11 +447,20 @@ profiles, the installer migrates Raspberry Pi Imager's root-only
 `/boot/firmware/network-config` into netplan without copying credentials into
 this repository.
 
-Add further known networks with:
+Open the Settings gear in the dashboard to scan nearby networks, select an
+SSID, choose WPA2/WPA3/open security, and connect. Wi-Fi mutations require a
+setup token so an unauthenticated browser on the LAN cannot replace the Pi's
+network configuration. Retrieve the token once on the Pi:
 
 ```bash
-sudo nmcli device wifi connect "SSID" password "PASSWORD" ifname wlan0
+cat /etc/watchtower/wifi-admin.token
 ```
+
+The browser keeps that token in `sessionStorage` only. Passwords are handed to
+a root-owned NetworkManager helper through a mode-0600 runtime file, never a
+shell command or process argument. The helper activates the new profile before
+removing an older duplicate, and the recovery timer keeps retrying every saved
+SSID after reboot or an outage.
 
 The main service retries indefinitely at 15-second intervals after a failure,
 each radio scanner restarts independently after a transient failure, and SQLite-locked event batches are queued for retry rather than discarded.
@@ -534,6 +546,9 @@ src/watchtower/
 ├── sub_decoder.py          # offline rtl_433 -r capture decoder
 ├── apple_continuity.py     # 0x4C00 subtype decoders (Find-My, Nearby-Info,
 │                           #   Proximity-Pairing 25-model lookup, AirDrop)
+├── flipper.py              # confidence-scored official BLE fingerprint
+├── rf_identity.py          # stable IDs from decoded/rolling RF envelopes
+├── wifi.py                 # safe NetworkManager status/request API
 ├── findmy_clusters.py      # rotating-MAC cluster tracker + co-presence inference
 ├── findmy_owned.py         # owned-tracker enrollment + EC-P224 catalog
 ├── findmy_tracker.py       # Pi-as-AirTag broadcaster
@@ -551,7 +566,7 @@ src/watchtower/
     ├── probe.html          # mobile site-survey page
     └── assets/app.js       # ~1 k LOC dashboard logic
 
-tests/                      # 44 passing unit tests, 6 integration tests
+tests/                      # 67 passing unit tests, 8 integration tests
 deploy/                     # systemd unit + pi-setup.sh + deploy.sh
 docs/superpowers/           # design specs and milestone plans
 ```

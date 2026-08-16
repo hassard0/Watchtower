@@ -12,6 +12,7 @@ from typing import Any
 from bleak import BleakScanner
 
 from watchtower.events import Event, EventKind, Features, Scanner as ScannerName
+from watchtower.flipper import detect_flipper_zero
 from watchtower.scanners.base import Scanner
 
 log = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ class BleScanner(Scanner):
                         self._last_emit.pop(k, None)
                     self._last_gc = now_ts
 
+                signature = detect_flipper_zero(local_name, services)
                 feats = Features(
                     mac=mac,
                     rssi=rssi,
@@ -161,6 +163,7 @@ class BleScanner(Scanner):
                     service_uuids=services,
                     manufacturer_data_hex=mfr_hex,
                     local_name=local_name,
+                    decoded={"device_detection": signature} if signature else {},
                 )
                 ev = Event(
                     scanner=ScannerName.BLE,

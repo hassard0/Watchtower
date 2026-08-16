@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from watchtower.events import Event, EventKind, Features, Scanner as ScannerName
+from watchtower.rf_identity import subghz_identification_metadata
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class SubDecoder:
             "-f", str(job.freq_hz),
             "-F", "json",
             "-M", "level",
+            "-M", "protocol",
         ]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -165,6 +167,7 @@ class SubDecoder:
             return None
         kind = _classify_kind(model)
         decoded = {k: v for k, v in d.items() if k not in ("time", "freq", "model")}
+        decoded["_watchtower"] = subghz_identification_metadata(decoded)
         return Event(
             scanner=ScannerName.SUBGHZ,
             kind=kind,
@@ -172,6 +175,7 @@ class SubDecoder:
                 protocol=model,
                 frequency_hz=job.freq_hz,
                 decoded=decoded,
+                local_name=model,
             ),
             raw={**d, "_capture_ts": job.ts_unix, "_decoded_offline": True},
         )

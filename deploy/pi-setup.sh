@@ -12,7 +12,7 @@ sudo apt-get install -y --no-install-recommends \
   rtl-sdr librtlsdr-dev rtl-433 \
   sqlite3 \
   build-essential pkg-config \
-  rsync git curl iw
+  rsync git curl iw network-manager openssl
 
 echo "[+] Ensuring core services are enabled at boot..."
 # bluetooth + NetworkManager are dependencies of watchtower.service.

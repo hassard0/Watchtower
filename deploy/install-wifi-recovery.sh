@@ -7,10 +7,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECONNECT_SCRIPT="$SCRIPT_DIR/watchtower-wifi-reconnect.sh"
 RECONNECT_SERVICE="$SCRIPT_DIR/watchtower-wifi-reconnect.service"
 RECONNECT_TIMER="$SCRIPT_DIR/watchtower-wifi-reconnect.timer"
+CONFIG_HELPER="$SCRIPT_DIR/watchtower-wifi-config"
+CONFIG_SERVICE="$SCRIPT_DIR/watchtower-wifi-config.service"
+CONFIG_PATH="$SCRIPT_DIR/watchtower-wifi-config.path"
+TMPFILES_CONFIG="$SCRIPT_DIR/watchtower-wifi.conf"
 
 sudo install -m 0755 "$RECONNECT_SCRIPT" /usr/local/sbin/watchtower-wifi-reconnect
 sudo install -m 0644 "$RECONNECT_SERVICE" /etc/systemd/system/watchtower-wifi-reconnect.service
 sudo install -m 0644 "$RECONNECT_TIMER" /etc/systemd/system/watchtower-wifi-reconnect.timer
+sudo install -m 0755 "$CONFIG_HELPER" /usr/local/sbin/watchtower-wifi-config
+sudo install -m 0644 "$CONFIG_SERVICE" /etc/systemd/system/watchtower-wifi-config.service
+sudo install -m 0644 "$CONFIG_PATH" /etc/systemd/system/watchtower-wifi-config.path
+sudo install -m 0644 "$TMPFILES_CONFIG" /etc/tmpfiles.d/watchtower-wifi.conf
+
+sudo install -d -o admin -g admin -m 0755 /etc/watchtower
+if [ ! -s /etc/watchtower/wifi-admin.token ]; then
+    sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/watchtower/wifi-admin.token'
+fi
+sudo chown admin:admin /etc/watchtower/wifi-admin.token
+sudo chmod 0600 /etc/watchtower/wifi-admin.token
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/watchtower-wifi.conf
 
 # Debian's renderer-only netplan file may be shipped world-readable, which
 # makes every boot emit warnings even though it contains no credentials.
@@ -34,4 +50,5 @@ fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now watchtower-wifi-reconnect.timer
+sudo systemctl enable --now watchtower-wifi-config.path
 sudo systemctl start watchtower-wifi-reconnect.service

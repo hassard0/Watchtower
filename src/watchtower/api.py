@@ -22,6 +22,14 @@ from ulid import ULID
 from watchtower.active_probe import probe_one, _apply_probe_result
 from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
 from watchtower.storage.db import get_connection
+from watchtower.wifi import (
+    WifiError,
+    queue_request,
+    read_result,
+    token_valid,
+    validate_connect_request,
+    wifi_status,
+)
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +146,12 @@ class ApiServer:
         # Settings
         self._app.router.add_get("/api/settings", self.settings_get)
         self._app.router.add_post("/api/settings", self.settings_set)
+        # NetworkManager-backed Wi-Fi controls. Mutation endpoints require the
+        # setup token stored root-side in /etc/watchtower/wifi-admin.token.
+        self._app.router.add_get("/api/wifi", self.wifi_get)
+        self._app.router.add_post("/api/wifi/connect", self.wifi_connect)
+        self._app.router.add_post("/api/wifi/forget", self.wifi_forget)
+        self._app.router.add_get("/api/wifi/results/{request_id}", self.wifi_result)
         # Admin / database tools
         self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
         self._app.router.add_post("/api/admin/test-ntfy", self.admin_test_ntfy)
@@ -1058,6 +1072,58 @@ class ApiServer:
             current[k] = v
         save_settings(self._db, current)
         return web.json_response({"ok": True, "settings": current})
+
+    @staticmethod
+    def _wifi_error(message: str, status: int = 400) -> web.Response:
+        return web.json_response({"ok": False, "error": message}, status=status)
+
+    @staticmethod
+    def _wifi_authorized(request: web.Request) -> bool:
+        return token_valid(request.headers.get("X-Watchtower-Admin-Token"))
+
+    async def wifi_get(self, request: web.Request) -> web.Response:
+        try:
+            rescan = request.query.get("rescan", "0").lower() in {"1", "true", "yes"}
+            return web.json_response(await _offload(wifi_status, rescan=rescan))
+        except WifiError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def wifi_connect(self, request: web.Request) -> web.Response:
+        if not self._wifi_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise WifiError("Expected a JSON object")
+            payload = validate_connect_request(body)
+            request_id = queue_request("connect", payload)
+            return web.json_response({"ok": True, "request_id": request_id}, status=202)
+        except (WifiError, json.JSONDecodeError) as exc:
+            status = 409 if "already in progress" in str(exc) else 400
+            return self._wifi_error(str(exc), status)
+
+    async def wifi_forget(self, request: web.Request) -> web.Response:
+        if not self._wifi_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            profile_uuid = str((body or {}).get("uuid") or "").strip()
+            if not profile_uuid:
+                raise WifiError("Saved profile UUID is required")
+            request_id = queue_request("forget", {"uuid": profile_uuid})
+            return web.json_response({"ok": True, "request_id": request_id}, status=202)
+        except (WifiError, json.JSONDecodeError, AttributeError) as exc:
+            status = 409 if "already in progress" in str(exc) else 400
+            return self._wifi_error(str(exc), status)
+
+    async def wifi_result(self, request: web.Request) -> web.Response:
+        try:
+            result = read_result(request.match_info["request_id"])
+            if result is None:
+                return web.json_response({"ok": True, "pending": True}, status=202)
+            return web.json_response(result)
+        except WifiError as exc:
+            return self._wifi_error(str(exc), 400)
 
     # ---- RECAP ----
 

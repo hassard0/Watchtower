@@ -54,6 +54,33 @@ def init_db(db_path: Path | str) -> None:
         for name, declaration in migrations.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE findmy_clusters ADD COLUMN {name} {declaration}")
+        entity_columns = {row[1] for row in conn.execute("PRAGMA table_info(entities)")}
+        entity_migrations = {
+            "friendly_name_source": "TEXT",
+            "friendly_name_confidence": "REAL",
+            "friendly_name_updated_unix": "INTEGER",
+        }
+        for name, declaration in entity_migrations.items():
+            if name not in entity_columns:
+                conn.execute(f"ALTER TABLE entities ADD COLUMN {name} {declaration}")
+        # Preserve pre-v7 labels as candidates.  Their provenance is unknown,
+        # so they remain replaceable by a stronger standardized observation.
+        conn.execute(
+            """UPDATE entities
+               SET friendly_name_source = 'legacy',
+                   friendly_name_confidence = 0.60,
+                   friendly_name_updated_unix = COALESCE(friendly_name_updated_unix, last_seen_unix)
+               WHERE friendly_name IS NOT NULL AND friendly_name_source IS NULL"""
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO entity_name_candidates
+                   (entity_id, name, source, confidence, first_seen_unix, last_seen_unix, evidence_json)
+               SELECT entity_id, friendly_name, 'legacy', 0.60,
+                      first_seen_unix, COALESCE(friendly_name_updated_unix, last_seen_unix), '{}'
+               FROM entities WHERE friendly_name IS NOT NULL"""
+        )
+        from watchtower.name_resolution import revalidate_name_candidates
+        revalidate_name_candidates(conn)
 
 
 def schema_version(db_path: Path | str) -> int:

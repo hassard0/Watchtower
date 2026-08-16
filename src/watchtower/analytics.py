@@ -24,6 +24,7 @@ from typing import Any
 from ulid import ULID
 
 from watchtower.storage.db import get_connection
+from watchtower.name_resolution import candidates_from_features, record_name_candidate
 
 log = logging.getLogger(__name__)
 
@@ -385,7 +386,8 @@ class Analytics:
             # Aggregate: entity_id -> stats. Also collect per-scanner per-hour-of-week feature values.
             entity_seen: dict[str, dict[str, Any]] = defaultdict(lambda: {
                 "scanner": "", "kind": "", "first": None, "last": None, "obs": 0,
-                "rssis": [], "is_random_mac": None, "vendor": None, "name": None,
+                "rssis": [], "is_random_mac": None, "vendor": None,
+                "name_candidates": {},
                 "obs_log": [],   # list of (ts_unix, rssi) for visit segmentation
             })
             scanner_hour_counts: dict[tuple[str, int], int] = defaultdict(int)
@@ -459,7 +461,10 @@ class Analytics:
                 e["obs_log"].append((ts_unix, rssi_int))
                 e["is_random_mac"] = feats.get("is_random_mac") if e["is_random_mac"] is None else e["is_random_mac"]
                 e["vendor"] = e["vendor"] or feats.get("vendor_oui")
-                e["name"] = e["name"] or feats.get("local_name")
+                for candidate_name, candidate_source, candidate_evidence in candidates_from_features(scanner, feats):
+                    e["name_candidates"][(candidate_source, candidate_name)] = (
+                        candidate_evidence, ts_unix
+                    )
 
             # Upsert entities.
             now = int(time.time())
@@ -473,8 +478,8 @@ class Analytics:
                     INSERT INTO entities (
                         entity_id, scanner, kind, first_seen_unix, last_seen_unix,
                         visit_count, total_observations, is_random_mac, avg_rssi, min_rssi, max_rssi,
-                        vendor, friendly_name, notes_inferred
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                        vendor, notes_inferred
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(entity_id) DO UPDATE SET
                         scanner = excluded.scanner,
                         kind = excluded.kind,
@@ -487,11 +492,15 @@ class Analytics:
                         min_rssi = MIN(COALESCE(entities.min_rssi, excluded.min_rssi), COALESCE(excluded.min_rssi, entities.min_rssi)),
                         max_rssi = MAX(COALESCE(entities.max_rssi, excluded.max_rssi), COALESCE(excluded.max_rssi, entities.max_rssi)),
                         vendor = COALESCE(entities.vendor, excluded.vendor),
-                        friendly_name = COALESCE(entities.friendly_name, excluded.friendly_name),
                         notes_inferred = COALESCE(excluded.notes_inferred, entities.notes_inferred)
                 """, (eid, e["scanner"], e["kind"], e["first"], e["last"],
                       e["obs"], 1 if e["is_random_mac"] else 0 if e["is_random_mac"] is False else None,
-                      avg, lo, hi, e["vendor"], e["name"], continuity_state))
+                      avg, lo, hi, e["vendor"], continuity_state))
+                for (candidate_source, candidate_name), (evidence, observed_unix) in e["name_candidates"].items():
+                    record_name_candidate(
+                        conn, eid, candidate_name, candidate_source,
+                        evidence=evidence, observed_unix=observed_unix,
+                    )
 
             # Update baseline_stats with Welford for scanner counts (per hour-of-week).
             for (scanner, hw), cnt in scanner_hour_counts.items():

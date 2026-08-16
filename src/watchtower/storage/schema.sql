@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS entities (
     visit_count      INTEGER NOT NULL DEFAULT 0,
     total_observations INTEGER NOT NULL DEFAULT 0,
     classification   TEXT,                     -- null | anchor | satellite | known_guest | untrusted
-    friendly_name    TEXT,                     -- user-set label
+    friendly_name    TEXT,                     -- selected local/user-friendly label
+    friendly_name_source TEXT,                 -- user | ble_gatt_device_name | ...
+    friendly_name_confidence REAL,             -- 0..1 confidence in selected label
+    friendly_name_updated_unix INTEGER,
     vendor           TEXT,                     -- inferred from OUI / mfr data
     is_random_mac    INTEGER,                  -- 0/1; null if N/A
     avg_rssi         REAL,
@@ -46,6 +49,24 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_last_seen ON entities(last_seen_unix);
 CREATE INDEX IF NOT EXISTS idx_entities_classification ON entities(classification);
 CREATE INDEX IF NOT EXISTS idx_entities_anomaly ON entities(anomaly_score);
+
+-- v7: auditable local friendly-name resolution.  Keep every observation so
+-- the selected label can change as better evidence becomes available without
+-- losing provenance.  No protected payloads or stable owner identifiers are
+-- derived here; these are names devices already disclose locally.
+CREATE TABLE IF NOT EXISTS entity_name_candidates (
+    entity_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    first_seen_unix INTEGER NOT NULL,
+    last_seen_unix  INTEGER NOT NULL,
+    evidence_json   TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (entity_id, source, name),
+    FOREIGN KEY (entity_id) REFERENCES entities(entity_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_name_candidates_entity
+    ON entity_name_candidates(entity_id, confidence DESC, last_seen_unix DESC);
 
 -- A "visit" is a contiguous window where an entity is present (gap < 5 min splits visits).
 CREATE TABLE IF NOT EXISTS entity_visits (
@@ -207,6 +228,6 @@ CREATE INDEX IF NOT EXISTS idx_findmy_catalog_pubkey ON findmy_key_catalog(pubke
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_mac ON findmy_key_catalog(expected_mac);
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_slot ON findmy_key_catalog(slot_start_unix);
 
--- Set schema version to 6 (tracker-family metadata + DULT state).
-DELETE FROM schema_meta WHERE version < 6;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (6);
+-- Set schema version to 7 (friendly-name candidates + provenance).
+DELETE FROM schema_meta WHERE version < 7;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (7);

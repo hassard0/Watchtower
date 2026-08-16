@@ -1299,10 +1299,10 @@ tailwind.config = {
                    class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
             <div class="flex-1">
               <div class="text-sm font-medium flex items-center gap-2">
-                <span>Active GATT probing</span>
+                <span>Local BLE name resolution</span>
                 <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/15 text-signal-glow">advanced</span>
               </div>
-              <div class="text-[11px] text-slate-500">Briefly connect to BLE devices to read their friendly name, manufacturer, and model. Most consumer devices respond. iPhones, AirTags, and locks reject. Off by default for privacy.</div>
+              <div class="text-[11px] text-slate-500">Briefly connects to nearby BLE devices and reads standardized public Device Name, manufacturer, and model fields. Names are scored locally with provenance; paired or protected data is never bypassed. Off by default.</div>
             </div>
           </label>
           <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
@@ -1533,11 +1533,32 @@ tailwind.config = {
             </div>
             <div class="flex-1 min-w-0">
               <input class="w-full bg-transparent text-xl font-bold tracking-tight outline-none border-b border-transparent hover:border-ink-600/60 focus:border-signal-glow/60 transition py-0.5"
-                     :value="entityDetail.entity?.friendly_name || entityDisplayName(entityDetail.entity)"
-                     @blur="renameEntity($event.target.value)" placeholder="Name this entity…"/>
+                     :value="entityDetail.entity?.friendly_name || ''"
+                     @blur="renameEntity($event.target.value)"
+                     :placeholder="'Suggested: ' + entityDisplayName(entityDetail.entity)"/>
               <div class="text-[10px] font-mono text-slate-500 mt-0.5" x-text="entityDetail.entity?.entity_id"></div>
+              <div x-show="entityDetail.entity?.friendly_name_source" class="flex items-center gap-2 mt-1">
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/10 text-signal-glow"
+                      x-text="nameSourceLabel(entityDetail.entity?.friendly_name_source)"></span>
+                <span class="text-[10px] text-slate-500"
+                      x-text="Math.round((entityDetail.entity?.friendly_name_confidence || 0) * 100) + '% confidence'"></span>
+              </div>
             </div>
             <button @click="entityDetail = null" class="text-slate-500 hover:text-slate-200 text-2xl">×</button>
+          </div>
+
+          <!-- local name evidence -->
+          <div class="mb-4" x-show="entityDetail.name_candidates?.length">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Local name evidence</div>
+            <div class="space-y-1">
+              <template x-for="candidate in entityDetail.name_candidates" :key="candidate.source + candidate.name">
+                <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-800/50 border border-ink-700/40">
+                  <span class="text-xs text-slate-200 flex-1 truncate" x-text="candidate.name"></span>
+                  <span class="text-[9px] text-slate-500" x-text="nameSourceLabel(candidate.source)"></span>
+                  <span class="text-[10px] num text-signal-glow" x-text="Math.round(candidate.confidence * 100) + '%'"></span>
+                </div>
+              </template>
+            </div>
           </div>
 
           <!-- classification picker -->

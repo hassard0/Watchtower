@@ -693,11 +693,18 @@ function watchtower() {
     async renameEntity(name) {
       if (!this.entityDetail) return;
       const eid = this.entityDetail.entity.entity_id;
-      await fetch(`/api/entities/${encodeURIComponent(eid)}/name`, {
+      const requested = (name || '').trim();
+      const current = this.entityDetail.entity.friendly_name || '';
+      if (requested === current) return;
+      const r = await fetch(`/api/entities/${encodeURIComponent(eid)}/name`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ friendly_name: name }),
+        body: JSON.stringify({ friendly_name: requested }),
       });
-      this.entityDetail.entity.friendly_name = name;
+      const result = await r.json();
+      this.entityDetail.entity.friendly_name = result.friendly_name;
+      this.entityDetail.entity.friendly_name_source = result.friendly_name_source;
+      this.entityDetail.entity.friendly_name_confidence = result.friendly_name_confidence;
+      await this.openEntity(eid);
       this.loadEntities();
     },
 
@@ -983,6 +990,20 @@ function watchtower() {
       }
       if (e.entity_id?.startsWith('ble:')) return e.entity_id.slice(4);
       return e.entity_id || '—';
+    },
+    nameSourceLabel(source) {
+      return ({
+        user: 'your label',
+        ble_gatt_device_name: 'BLE Device Name',
+        ble_gatt_model: 'BLE model',
+        ble_advertised_name: 'BLE advertisement',
+        wifi_wps_device_name: 'Wi-Fi WPS name',
+        wifi_wps_model: 'Wi-Fi WPS model',
+        wifi_ssid: 'Wi-Fi SSID',
+        signature: 'verified signature',
+        service_fingerprint: 'protocol fingerprint',
+        legacy: 'existing label',
+      })[source] || source || 'unresolved';
     },
     entityMetaLine(e) {
       const bits = [];

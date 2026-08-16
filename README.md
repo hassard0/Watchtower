@@ -168,11 +168,15 @@ Crucial extras:
   `standards-oui.ieee.org`) at `/var/lib/watchtower/oui-cache.txt`.
   Stable-MAC entities self-identify as "eero inc.", "Espressif",
   "Samsung", "Sagemcom", "TP-Link" etc. without any active probing.
-- **GATT prober** — when an unknown device shows up, the prober
-  briefly pauses the passive scan and tries a polite GATT connect to
-  read the *Device Name* characteristic. Most phones, watches, and
-  earbuds happily reveal their model name this way (e.g. "iPhone",
-  "Apple Watch", "[TV] Samsung The Frame (49)").
+- **Local friendly-name resolver** — advertised BLE names, standardized
+  GATT Device Name/model fields, Wi-Fi WPS metadata, SSIDs, and verified
+  protocol signatures are retained as confidence-scored candidates. The UI
+  shows the winning name's provenance; an explicit user label always wins.
+  Protected identity data is never cracked or guessed.
+- **GATT prober** — when enabled, the prober briefly pauses the passive
+  scan and tries a polite GATT connection to read public *Device Name*,
+  manufacturer, and model characteristics. Devices that require pairing
+  simply reject the read. Automatic probes do not collect serial numbers.
 - **Apple Continuity decoder** — Apple devices broadcast a 0x4C00
   manufacturer-data prefix with an inner subtype byte. We decode
   AirDrop / AirPlay / Find-My / Nearby-Info / Proximity-Pairing
@@ -534,15 +538,14 @@ Settings UI (toggleable from the dashboard at runtime):
   prefix
 - Honeypot enable + rotation cadence
 - Find-My tracker broadcaster enable
-- Active GATT probing enable
+- Local BLE name-resolution probing enable
 
 ---
 
 ## Roadmap
 
 - **v1.5 (next)** — UPS HAT support, ntfy push routing, heartbeat /
-  watchdog, tamper detection, smarter active BLE GATT probing for
-  richer device identification
+  watchdog, tamper detection, and broader local DNS-SD/mDNS enrichment
 - **v2** — vulcan (or other) cloud sink for cold-tier storage, ML
   training pipeline using user feedback as labels, Hailo-8L NPU for
   on-device autoencoder anomaly scoring

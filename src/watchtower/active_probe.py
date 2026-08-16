@@ -33,6 +33,7 @@ from bleak import BleakClient
 from bleak.exc import BleakError
 
 from watchtower.storage.db import get_connection
+from watchtower.name_resolution import clean_name, record_name_candidate
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,6 @@ UUID_DEVICE_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
 UUID_MFR_NAME = "00002a29-0000-1000-8000-00805f9b34fb"
 UUID_MODEL = "00002a24-0000-1000-8000-00805f9b34fb"
 UUID_FW = "00002a26-0000-1000-8000-00805f9b34fb"
-UUID_SERIAL = "00002a25-0000-1000-8000-00805f9b34fb"
 
 PROBE_TIMEOUT_SEC = 5.0
 PER_CHAR_READ_TIMEOUT_SEC = 1.5
@@ -61,23 +61,22 @@ def _mark_outgoing(mac: str) -> None:
 
 async def _connect_and_read(mac: str, adapter: str | None) -> dict:
     """Inner connect-and-read. Bails early once name + mfr are populated to
-    avoid waiting on read timeouts for devices that don't expose model/fw/serial."""
+    avoid waiting on read timeouts for devices that don't expose model/fw."""
     out: dict = {"ok": False, "name": None, "mfr": None, "model": None,
-                 "fw": None, "serial": None, "error": None}
+                 "fw": None, "error": None}
     async with BleakClient(mac, timeout=PROBE_TIMEOUT_SEC, adapter=adapter) as client:
         for key, uuid in (
             ("name", UUID_DEVICE_NAME),
             ("mfr", UUID_MFR_NAME),
             ("model", UUID_MODEL),
             ("fw", UUID_FW),
-            ("serial", UUID_SERIAL),
         ):
             try:
                 data = await asyncio.wait_for(
                     client.read_gatt_char(uuid),
                     timeout=PER_CHAR_READ_TIMEOUT_SEC,
                 )
-                out[key] = data.decode("utf-8", errors="replace").strip("\x00").strip() or None
+                out[key] = clean_name(data.decode("utf-8", errors="replace"))
             except (BleakError, asyncio.TimeoutError, OSError):
                 pass
             except Exception:  # noqa: BLE001
@@ -97,10 +96,10 @@ async def probe_one(mac: str, adapter: str | None = "hci0", pause_scanner=None) 
     "operation already in progress" or similar, retry once with the scanner
     paused via `pause_scanner` if provided.
 
-    Returns: {"ok": bool, "name", "mfr", "model", "fw", "serial", "error"}
+    Returns: {"ok": bool, "name", "mfr", "model", "fw", "error"}
     """
     out: dict = {"ok": False, "name": None, "mfr": None, "model": None,
-                 "fw": None, "serial": None, "error": None}
+                 "fw": None, "error": None}
     _mark_outgoing(mac)
     # First attempt: no pause — much faster (avoids the ~3-5s scanner restart).
     try:
@@ -167,7 +166,8 @@ def _candidate_entities(conn, max_n: int = 10) -> list[tuple[str, str, str | Non
     now = int(time.time())
     attempts = _load_attempts(conn)
     rows = conn.execute(
-        """SELECT entity_id, friendly_name, total_observations, last_seen_unix
+        """SELECT entity_id, friendly_name, friendly_name_source,
+                  total_observations, last_seen_unix
            FROM entities
            WHERE entity_id LIKE 'ble:mac:%'
              AND last_seen_unix > ?
@@ -177,7 +177,7 @@ def _candidate_entities(conn, max_n: int = 10) -> list[tuple[str, str, str | Non
         (now - 600,),
     ).fetchall()
     out: list[tuple[str, str, str | None]] = []
-    for entity_id, friendly_name, total_obs, last_seen in rows:
+    for entity_id, friendly_name, friendly_name_source, total_obs, last_seen in rows:
         mac = _entity_mac(entity_id)
         if not mac:
             continue
@@ -188,7 +188,7 @@ def _candidate_entities(conn, max_n: int = 10) -> list[tuple[str, str, str | Non
         if last_attempt and (now - last_attempt) < cooldown:
             continue
         # Skip entities that already have a user-set name.
-        if friendly_name and a.get("name_source") == "user_set":
+        if friendly_name and friendly_name_source == "user":
             continue
         out.append((entity_id, mac, friendly_name))
         if len(out) >= max_n:
@@ -201,28 +201,24 @@ def _apply_probe_result(conn, entity_id: str, result: dict) -> None:
     now = int(time.time())
     attempts = _load_attempts(conn)
     if result["ok"]:
-        nice = result.get("name") or result.get("model") or result.get("mfr")
-        if nice:
-            # Compose a richer friendly name when we have multiple fields.
-            parts = []
-            if result.get("name"):
-                parts.append(result["name"])
-            elif result.get("model"):
-                parts.append(result["model"])
-            if result.get("mfr") and result.get("mfr") not in parts:
-                parts.append(f"({result['mfr']})")
-            friendly = " ".join(parts)[:120]
+        evidence = {key: result.get(key) for key in ("mfr", "model", "fw") if result.get(key)}
+        if result.get("mfr"):
             conn.execute(
-                """UPDATE entities SET
-                    friendly_name = ?,
-                    notes_inferred = COALESCE(notes_inferred, '') ||
-                        CASE WHEN notes_inferred IS NULL OR notes_inferred = ''
-                             THEN '' ELSE ' · ' END
-                        || ?
-                   WHERE entity_id = ?""",
-                (friendly,
-                 f"GATT: {json.dumps({k:v for k,v in result.items() if v and k != 'ok'}, separators=(',',':'))[:200]}",
-                 entity_id),
+                "UPDATE entities SET vendor = COALESCE(vendor, ?) WHERE entity_id = ?",
+                (result["mfr"], entity_id),
+            )
+        if result.get("name"):
+            record_name_candidate(
+                conn, entity_id, result["name"], "ble_gatt_device_name",
+                evidence=evidence, observed_unix=now,
+            )
+        if result.get("model"):
+            model = result["model"]
+            mfr = result.get("mfr")
+            display = f"{mfr} {model}" if mfr and mfr.casefold() not in model.casefold() else model
+            record_name_candidate(
+                conn, entity_id, display, "ble_gatt_model",
+                evidence=evidence, observed_unix=now,
             )
         attempts[entity_id] = {"ts": now, "outcome": "ok", "name_source": "active_gatt", "result": result}
     else:

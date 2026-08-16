@@ -21,6 +21,7 @@ from ulid import ULID
 
 from watchtower.active_probe import probe_one, _apply_probe_result
 from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
+from watchtower.name_resolution import candidates_for_entity, set_user_name
 from watchtower.storage.db import get_connection
 from watchtower.wifi import (
     WifiError,
@@ -507,7 +508,9 @@ class ApiServer:
         def _query():
             with get_connection(db_path) as conn:
                 cursor = conn.execute(f"""
-                    SELECT entity_id, scanner, kind, friendly_name, classification,
+                    SELECT entity_id, scanner, kind, friendly_name,
+                           friendly_name_source, friendly_name_confidence,
+                           friendly_name_updated_unix, classification,
                            first_seen_unix, last_seen_unix, visit_count, total_observations,
                            avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
                            vendor, is_random_mac
@@ -534,7 +537,9 @@ class ApiServer:
         eid = request.match_info["eid"]
         with get_connection(self._db) as conn:
             cursor = conn.execute("""
-                SELECT entity_id, scanner, kind, friendly_name, classification,
+                SELECT entity_id, scanner, kind, friendly_name,
+                       friendly_name_source, friendly_name_confidence,
+                       friendly_name_updated_unix, classification,
                        first_seen_unix, last_seen_unix, visit_count, total_observations,
                        avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
                        vendor, is_random_mac, notes_inferred
@@ -544,6 +549,7 @@ class ApiServer:
             if not row:
                 return web.json_response({"error": "entity not found"}, status=404)
             entity = _row_to_dict(cursor, row)
+            name_candidates = candidates_for_entity(conn, eid)
 
             visits_cursor = conn.execute("""
                 SELECT visit_id, start_unix, end_unix, duration_sec, observation_count, avg_rssi, max_rssi
@@ -563,7 +569,8 @@ class ApiServer:
                 LIMIT 10
             """, (eid, eid))
             copresence = [_row_to_dict(copresence_cursor, r) for r in copresence_cursor.fetchall()]
-        return web.json_response({"entity": entity, "visits": visits, "copresence": copresence})
+        return web.json_response({"entity": entity, "name_candidates": name_candidates,
+                                  "visits": visits, "copresence": copresence})
 
     async def classify_entity(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
@@ -583,15 +590,18 @@ class ApiServer:
     async def rename_entity(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
         body = await request.json()
-        name = (body.get("friendly_name") or "").strip() or None
+        requested_name = body.get("friendly_name")
         with get_connection(self._db) as conn:
-            cur = conn.execute(
-                "UPDATE entities SET friendly_name = ? WHERE entity_id = ?",
-                (name, eid),
-            )
-            if cur.rowcount == 0:
+            if not conn.execute("SELECT 1 FROM entities WHERE entity_id = ?", (eid,)).fetchone():
                 return web.json_response({"error": "entity not found"}, status=404)
-        return web.json_response({"ok": True, "friendly_name": name})
+            set_user_name(conn, eid, requested_name)
+            row = conn.execute(
+                """SELECT friendly_name, friendly_name_source, friendly_name_confidence
+                   FROM entities WHERE entity_id = ?""", (eid,),
+            ).fetchone()
+        return web.json_response({"ok": True, "friendly_name": row[0],
+                                  "friendly_name_source": row[1],
+                                  "friendly_name_confidence": row[2]})
 
     async def probe_entity(self, request: web.Request) -> web.Response:
         """Synchronously fire a GATT probe at the entity's MAC and return the result.

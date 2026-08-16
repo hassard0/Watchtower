@@ -41,6 +41,10 @@ class Features:
     service_data_hex: dict[str, str] = field(default_factory=dict)
     manufacturer_data_hex: str | None = None
     encrypted_ad_data_hex: list[str] = field(default_factory=list)
+    # BlueZ's authoritative BLE address classification ("public" or
+    # "random").  BLE privacy addresses cannot be identified reliably from
+    # the IEEE locally-administered bit alone.
+    address_type: str | None = None
     is_random_mac: bool | None = None
     tx_power: int | None = None
     local_name: str | None = None

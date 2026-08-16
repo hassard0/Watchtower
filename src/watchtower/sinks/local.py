@@ -77,10 +77,36 @@ class LocalSink(Sink):
             log.exception("local sink flush failed; %d events lost", len(rows))
 
     def _write_rows(self, rows: list[tuple]) -> None:
+        random_ble_entities: set[str] = set()
+        for row in rows:
+            if row[3] != "ble_scanner":
+                continue
+            try:
+                features = json.loads(row[5])
+            except (TypeError, ValueError):
+                continue
+            if (str(features.get("address_type") or "").lower() == "random"
+                    and features.get("mac")):
+                random_ble_entities.add(
+                    f"ble:mac:{str(features['mac']).lower()}"
+                )
         with get_connection(self._db) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 conn.executemany(_INSERT_SQL, rows)
+                if random_ble_entities:
+                    # Self-heal identities created by releases that mistook a
+                    # rotating BLE privacy address for a public/stable MAC.
+                    # The raw observations remain untouched.
+                    conn.executemany(
+                        """UPDATE entities
+                           SET is_random_mac = 1,
+                               notes_inferred = COALESCE(
+                                   notes_inferred,
+                                   'Legacy rotating BLE privacy address')
+                           WHERE entity_id = ?""",
+                        [(entity_id,) for entity_id in random_ble_entities],
+                    )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")

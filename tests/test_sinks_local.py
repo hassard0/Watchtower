@@ -94,3 +94,27 @@ async def test_sink_persists_features_and_raw(tmp_path: Path):
     assert feats["rssi"] == -50
     assert feats["mac"] == "aa:bb:cc:dd:ee:ff"
     assert json.loads(row[4]) == {"k": "v"}
+
+
+async def test_sink_retires_legacy_entity_for_bluez_random_address(tmp_path: Path):
+    db = tmp_path / "t.db"
+    init_db(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO entities
+                   (entity_id,scanner,kind,first_seen_unix,last_seen_unix,is_random_mac)
+               VALUES ('ble:mac:aa:bb:cc:dd:ee:ff','ble_scanner','ble_device',1,1,0)"""
+        )
+    sink = LocalSink(db, batch_size=1, flush_interval=10.0)
+    await sink.start()
+    event = _ev()
+    event.features.address_type = "random"
+    event.features.is_random_mac = True
+    await sink.write(event)
+    await sink.stop()
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            """SELECT is_random_mac, notes_inferred FROM entities
+               WHERE entity_id = 'ble:mac:aa:bb:cc:dd:ee:ff'"""
+        ).fetchone()
+    assert row == (1, "Legacy rotating BLE privacy address")

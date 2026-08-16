@@ -20,13 +20,49 @@ from watchtower.scanners.base import Scanner
 log = logging.getLogger(__name__)
 
 
-def _is_random_mac(mac: str) -> bool:
-    """The locally-administered bit (bit 1 of MSB) flags random/non-OUI MACs."""
+def _bluez_address_type(platform_data: Any, device_details: Any = None) -> str | None:
+    """Return BlueZ's authoritative Device1.AddressType when available."""
+    candidates: list[Any] = []
+    try:
+        candidates.append(platform_data[1])
+    except (IndexError, TypeError):
+        pass
+    if isinstance(device_details, dict):
+        candidates.extend((device_details.get("props"), device_details))
+    for props in candidates:
+        if not isinstance(props, dict):
+            continue
+        value = props.get("AddressType")
+        value = getattr(value, "value", value)
+        if value is None:
+            continue
+        normalized = str(value).strip().lower().replace("_", "-")
+        if normalized in {"public", "public-id"}:
+            return "public"
+        if normalized in {"random", "random-id"}:
+            return "random"
+    return None
+
+
+def _is_random_mac(mac: str, address_type: str | None = None) -> bool | None:
+    """Classify BLE privacy addresses without mistaking public OUIs for them.
+
+    BlueZ knows whether an address came from the public or random BLE address
+    space.  When a backend does not expose that information, a set IEEE
+    locally-administered bit is useful evidence of randomization; an unset bit
+    is *not* evidence that a BLE address is public, so the result remains
+    unknown instead of incorrectly creating a stable entity.
+    """
+    normalized = str(address_type or "").strip().lower()
+    if normalized == "random":
+        return True
+    if normalized == "public":
+        return False
     try:
         first = int(mac.split(":")[0], 16)
     except (IndexError, ValueError):
-        return False
-    return bool(first & 0x02)
+        return None
+    return True if first & 0x02 else None
 
 
 # Minimal seed table covering well-known historical OUIs. The full IEEE OUI
@@ -159,7 +195,11 @@ class BleScanner(Scanner):
                 services = list(adv.service_uuids or [])
                 service_data = {str(k): v.hex() for k, v in (adv.service_data or {}).items()}
                 mfr_hex = _mfr_data_to_hex(adv.manufacturer_data or {})
-                ead_hex = _encrypted_ad_data(getattr(adv, "platform_data", ()))
+                platform_data = getattr(adv, "platform_data", ())
+                ead_hex = _encrypted_ad_data(platform_data)
+                address_type = _bluez_address_type(
+                    platform_data, getattr(device, "details", None),
+                )
                 local_name = adv.local_name or device.name
                 # Dedupe key: same MAC + same advertisement content.
                 # RSSI is excluded so RSSI fluctuations don't bypass dedup;
@@ -199,7 +239,8 @@ class BleScanner(Scanner):
                     rssi=rssi,
                     tx_power=int(adv.tx_power) if adv.tx_power is not None else None,
                     vendor_oui=_vendor_for_oui(mac),
-                    is_random_mac=_is_random_mac(mac),
+                    address_type=address_type,
+                    is_random_mac=_is_random_mac(mac, address_type),
                     service_uuids=services,
                     service_data_hex=service_data,
                     manufacturer_data_hex=mfr_hex,
@@ -213,6 +254,7 @@ class BleScanner(Scanner):
                     features=feats,
                     raw={
                         "address": device.address,
+                        "address_type": address_type,
                         "name": device.name,
                         "rssi": adv.rssi,
                         "tx_power": adv.tx_power,

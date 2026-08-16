@@ -6,7 +6,7 @@ import pytest
 
 from watchtower.events import EventKind, Scanner as ScannerName
 from watchtower.scanners.ble import BleScanner
-from watchtower.scanners.ble import _encrypted_ad_data
+from watchtower.scanners.ble import _bluez_address_type, _encrypted_ad_data
 
 
 def test_extracts_bluez_encrypted_advertising_data():
@@ -18,6 +18,7 @@ def _fake_device(address: str = "aa:bb:cc:dd:ee:ff", name: str | None = "iPhone"
     d = MagicMock()
     d.address = address
     d.name = name
+    d.details = {"props": {"AddressType": "random"}}
     return d
 
 
@@ -31,6 +32,7 @@ def _fake_advertisement(rssi: int = -55, tx_power: int | None = -8,
     a.service_uuids = service_uuids or ["fd6f"]
     a.manufacturer_data = manufacturer_data or {0x004C: bytes.fromhex("1005")}
     a.local_name = local_name
+    a.platform_data = ("/org/bluez/hci0/dev_x", {"AddressType": "random"})
     return a
 
 
@@ -74,15 +76,25 @@ async def test_ble_scanner_emits_on_advertisement():
     assert e.features.manufacturer_data_hex.lower().startswith("4c00") or \
            e.features.manufacturer_data_hex.lower().startswith("004c")
     assert e.features.local_name == "iPhone"
+    assert e.features.address_type == "random"
+    assert e.features.is_random_mac is True
 
 
 def test_ble_is_random_mac_detection():
     from watchtower.scanners.ble import _is_random_mac
-    # locally-administered bit (bit 1 of first byte) set => random
+    assert _is_random_mac("a8:bb:cc:dd:ee:ff", "random") is True
+    assert _is_random_mac("ca:bb:cc:dd:ee:ff", "public") is False
+    # The U/L bit is useful fallback evidence, but an unset bit is unknown.
     assert _is_random_mac("ca:bb:cc:dd:ee:ff") is True   # first byte 0xCA, bit1=1
     assert _is_random_mac("aa:bb:cc:dd:ee:ff") is True   # 0xAA bit1=1
-    assert _is_random_mac("a8:bb:cc:dd:ee:ff") is False  # 0xA8 bit1=0
-    assert _is_random_mac("00:1A:11:22:33:44") is False  # 0x00 bit1=0
+    assert _is_random_mac("a8:bb:cc:dd:ee:ff") is None
+    assert _is_random_mac("00:1A:11:22:33:44") is None
+
+
+def test_extracts_bluez_address_type_from_advertisement_or_device():
+    assert _bluez_address_type(("/dev/x", {"AddressType": "public"})) == "public"
+    assert _bluez_address_type((), {"props": {"AddressType": "random"}}) == "random"
+    assert _bluez_address_type(("/dev/x", {}), {}) is None
 
 
 def test_ble_vendor_oui_lookup():

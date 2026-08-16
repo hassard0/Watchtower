@@ -1343,6 +1343,7 @@ class ApiServer:
                        avg_rssi, total_observations, anomaly_score
                 FROM entities
                 WHERE first_seen_unix >= ?
+                  AND COALESCE(is_random_mac, 0) != 1
                 ORDER BY total_observations DESC LIMIT 30
             """, (since,)).fetchall()
             departed_entities = conn.execute("""
@@ -1351,6 +1352,7 @@ class ApiServer:
                 FROM entities
                 WHERE last_seen_unix BETWEEN ? AND ?
                   AND last_seen_unix < ? - 600
+                  AND COALESCE(is_random_mac, 0) != 1
                 ORDER BY last_seen_unix DESC LIMIT 30
             """, (since, now, now)).fetchall()
             alert_counts = conn.execute("""

@@ -50,6 +50,20 @@ CREATE INDEX IF NOT EXISTS idx_entities_last_seen ON entities(last_seen_unix);
 CREATE INDEX IF NOT EXISTS idx_entities_classification ON entities(classification);
 CREATE INDEX IF NOT EXISTS idx_entities_anomaly ON entities(anomaly_score);
 
+-- Candidate identities must repeat before becoming dashboard devices.  This
+-- prevents one-off rtl_433 false decodes from flooding the "new" list while
+-- retaining every raw observation for later analysis.
+CREATE TABLE IF NOT EXISTS entity_candidates (
+    entity_id          TEXT PRIMARY KEY,
+    scanner            TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    first_seen_unix    INTEGER NOT NULL,
+    last_seen_unix     INTEGER NOT NULL,
+    observation_count  INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_entity_candidates_last_seen
+    ON entity_candidates(last_seen_unix);
+
 -- v7: auditable local friendly-name resolution.  Keep every observation so
 -- the selected label can change as better evidence becomes available without
 -- losing provenance.  No protected payloads or stable owner identifiers are
@@ -244,6 +258,6 @@ CREATE TABLE IF NOT EXISTS name_decryption_keys (
 CREATE INDEX IF NOT EXISTS idx_name_decryption_keys_type
     ON name_decryption_keys(key_type, enabled);
 
--- Set schema version to 8 (authorized friendly-name decryption vault).
-DELETE FROM schema_meta WHERE version < 8;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (8);
+-- Set schema version to 9 (repeat-confirmed RF identities).
+DELETE FROM schema_meta WHERE version < 9;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (9);

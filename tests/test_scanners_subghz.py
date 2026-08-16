@@ -1,13 +1,17 @@
 """Tests for SubGhzScanner — parses rtl_433 JSON output via mock subprocess."""
 import asyncio
 import json
+import sqlite3
+import time
+from pathlib import Path
 
 import pytest
 
 from watchtower.events import EventKind, Scanner as ScannerName
 from watchtower.scanners.subghz import SubGhzScanner, _line_to_event
-from watchtower.analytics import _entity_id_for
+from watchtower.analytics import Analytics, _entity_id_for
 from watchtower.rf_identity import stable_subghz_identity, subghz_identification_metadata
+from watchtower.storage.db import init_db
 
 
 def test_keyfob_line_to_event():
@@ -77,6 +81,41 @@ def test_stable_id_is_used_while_rolling_code_is_metadata_only():
     metadata = subghz_identification_metadata(decoded)
     assert metadata["stable_identity_value"] == "0x123"
     assert metadata["protected_or_volatile_fields"] == ["mic", "rolling_code"]
+
+
+def test_subghz_identity_must_repeat_before_becoming_entity(tmp_path: Path):
+    db = tmp_path / "watchtower.db"
+    init_db(db)
+    now = int(time.time())
+    features = json.dumps({"protocol": "Interlogix-Security", "decoded": {"id": "abc123"}})
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO raw_events
+                   (event_id,ts,ts_unix,scanner,kind,features_json,raw_json)
+               VALUES ('event-1','2026-08-16T00:00:00Z',?,'subghz_scanner',
+                       'subghz_protocol_decoded',?,'{}')""",
+            (now, features),
+        )
+    analytics = Analytics(db)
+    analytics.step()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT observation_count FROM entity_candidates"
+        ).fetchone()[0] == 1
+        conn.execute(
+            """INSERT INTO raw_events
+                   (event_id,ts,ts_unix,scanner,kind,features_json,raw_json)
+               VALUES ('event-2','2026-08-16T00:00:01Z',?,'subghz_scanner',
+                       'subghz_protocol_decoded',?,'{}')""",
+            (now + 1, features),
+        )
+    analytics.step()
+    with sqlite3.connect(db) as conn:
+        entity = conn.execute(
+            "SELECT entity_id,total_observations FROM entities"
+        ).fetchone()
+    assert entity == ("subghz:Interlogix-Security:abc123", 2)
 
 
 async def test_subghz_scanner_consumes_subprocess_lines(monkeypatch):

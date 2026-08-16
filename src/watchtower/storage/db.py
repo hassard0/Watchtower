@@ -85,6 +85,28 @@ def init_db(db_path: Path | str) -> None:
         )
         revalidate_name_candidates(conn)
         backfill_apple_audio_groups(conn)
+        # Older builds promoted every rtl_433 decode immediately.  Move only
+        # untouched singletons back to the repeat-confirmation queue; raw
+        # observations and user-classified/named entities are preserved.
+        conn.execute(
+            """INSERT OR IGNORE INTO entity_candidates
+                   (entity_id, scanner, kind, first_seen_unix, last_seen_unix,
+                    observation_count)
+               SELECT entity_id, scanner, kind, first_seen_unix, last_seen_unix,
+                      total_observations
+               FROM entities
+               WHERE scanner = 'subghz_scanner'
+                 AND total_observations <= 1
+                 AND classification IS NULL
+                 AND friendly_name IS NULL"""
+        )
+        conn.execute(
+            """DELETE FROM entities
+               WHERE scanner = 'subghz_scanner'
+                 AND total_observations <= 1
+                 AND classification IS NULL
+                 AND friendly_name IS NULL"""
+        )
 
 
 def schema_version(db_path: Path | str) -> int:

@@ -229,7 +229,11 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
     if tracker.get("alert_eligible"):
         family = tracker.get("family") or "unknown"
         return f"ble:tracker:{family}"
-    if features.get("is_random_mac") is False:
+    # AddressType comes directly from BlueZ and is the only reliable way to
+    # distinguish public BLE addresses from rotating private addresses.  A
+    # public Apple device can safely keep its MAC identity.
+    address_type = str(features.get("address_type") or "").lower()
+    if address_type == "public":
         return f"ble:mac:{mac.lower()}"
     name = (features.get("local_name") or "").strip()
     if name:
@@ -244,6 +248,11 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
         # Group by Apple Continuity subtype. Multiple iPhones broadcasting
         # Nearby-Info will share an entity — we report population, not per-device.
         return f"ble:apple:{apple_kind}"
+    # Compatibility for historical/non-BlueZ events.  Never trust the old
+    # byte heuristic for Apple Continuity packets: their private addresses
+    # routinely look like public IEEE addresses.
+    if not address_type and features.get("is_random_mac") is False:
+        return f"ble:mac:{mac.lower()}"
     # Otherwise: random MAC with no useful identifier → background noise.
     return None
 
@@ -438,9 +447,16 @@ class Analytics:
             })
             scanner_hour_counts: dict[tuple[str, int], int] = defaultdict(int)
             midband_hour_energy: dict[tuple[str, int], list[float]] = defaultdict(list)
+            legacy_random_ble_entities: set[str] = set()
 
             for event_id, ts_unix, scanner, kind, feats_json in rows:
                 feats = json.loads(feats_json) if feats_json else {}
+                if (scanner == "ble_scanner"
+                        and str(feats.get("address_type") or "").lower() == "random"
+                        and feats.get("mac")):
+                    legacy_random_ble_entities.add(
+                        f"ble:mac:{str(feats['mac']).lower()}"
+                    )
                 if scanner == "ble_scanner" and authorized_keys:
                     used_keys.update(self._apply_authorized_name_crypto(feats, authorized_keys))
                 hw = _hour_of_week(ts_unix)
@@ -514,9 +530,65 @@ class Analytics:
                         candidate_evidence, ts_unix
                     )
 
+            # Retire any MAC entity made by an older scanner as soon as BlueZ
+            # authoritatively reports that same address as random.  This makes
+            # the recap self-healing without deleting observations or waiting
+            # for another reboot/migration pass.
+            if legacy_random_ble_entities:
+                conn.executemany(
+                    """UPDATE entities
+                       SET is_random_mac = 1,
+                           notes_inferred = COALESCE(
+                               notes_inferred, 'Legacy rotating BLE privacy address')
+                       WHERE entity_id = ?""",
+                    [(eid,) for eid in legacy_random_ble_entities],
+                )
+
             # Upsert entities.
             now = int(time.time())
+            conn.execute(
+                "DELETE FROM entity_candidates WHERE last_seen_unix < ?",
+                (now - 86400,),
+            )
+            unconfirmed_entities: set[str] = set()
             for eid, e in entity_seen.items():
+                if e["scanner"] == "subghz_scanner":
+                    existing = conn.execute(
+                        "SELECT 1 FROM entities WHERE entity_id = ?", (eid,),
+                    ).fetchone()
+                    if not existing:
+                        conn.execute(
+                            """INSERT INTO entity_candidates
+                                   (entity_id, scanner, kind, first_seen_unix,
+                                    last_seen_unix, observation_count)
+                               VALUES (?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(entity_id) DO UPDATE SET
+                                   first_seen_unix = MIN(
+                                       entity_candidates.first_seen_unix,
+                                       excluded.first_seen_unix),
+                                   last_seen_unix = MAX(
+                                       entity_candidates.last_seen_unix,
+                                       excluded.last_seen_unix),
+                                   observation_count =
+                                       entity_candidates.observation_count +
+                                       excluded.observation_count""",
+                            (eid, e["scanner"], e["kind"], e["first"],
+                             e["last"], e["obs"]),
+                        )
+                        candidate = conn.execute(
+                            """SELECT first_seen_unix, last_seen_unix,
+                                      observation_count
+                               FROM entity_candidates WHERE entity_id = ?""",
+                            (eid,),
+                        ).fetchone()
+                        if not candidate or candidate[2] < 2:
+                            unconfirmed_entities.add(eid)
+                            continue
+                        e["first"], e["last"], e["obs"] = candidate
+                        conn.execute(
+                            "DELETE FROM entity_candidates WHERE entity_id = ?",
+                            (eid,),
+                        )
                 rssis = e["rssis"]
                 avg = sum(rssis) / len(rssis) if rssis else None
                 lo = min(rssis) if rssis else None
@@ -549,6 +621,9 @@ class Analytics:
                         conn, eid, candidate_name, candidate_source,
                         evidence=evidence, observed_unix=observed_unix,
                     )
+
+            for eid in unconfirmed_entities:
+                entity_seen.pop(eid, None)
 
             # Update baseline_stats with Welford for scanner counts (per hour-of-week).
             for (scanner, hw), cnt in scanner_hour_counts.items():

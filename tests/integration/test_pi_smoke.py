@@ -59,7 +59,7 @@ def test_db_exists_and_has_schema(pi_host: str):
         "sqlite3 -readonly -cmd '.timeout 5000' "
         "/var/lib/watchtower/watchtower.db 'SELECT version FROM schema_meta;'",
     )
-    assert out.strip() == "5"  # current schema includes Find-My ownership tables
+    assert out.strip() == "6"  # current schema includes cross-platform tracker metadata
 
 
 def _sqlite_count(host: str, scanner: str) -> int:

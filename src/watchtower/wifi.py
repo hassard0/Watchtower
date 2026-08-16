@@ -2,19 +2,23 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
-import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-
 WIFI_RUNTIME_DIR = Path("/run/watchtower-wifi")
 WIFI_TOKEN_PATH = Path("/etc/watchtower/wifi-admin.token")
+WIFI_SCAN_CACHE = Path("/run/watchtower-wifi/scan-cache.txt")
 _SECURED = {"wpa2", "wpa3"}
+FALLBACK_AP_NAME = "Watchtower Setup"
+FALLBACK_AP_SSID = "Watchtower"
+FALLBACK_AP_NETWORK = ipaddress.ip_network("10.42.0.0/24")
 
 
 class WifiError(RuntimeError):
@@ -66,17 +70,32 @@ def _nmcli(args: list[str], timeout: float = 20.0) -> subprocess.CompletedProces
 
 def wifi_status(interface: str = "wlan0", *, rescan: bool = False) -> dict[str, Any]:
     """Return current, visible, and saved Wi-Fi networks without secrets."""
+    connection_proc = _nmcli([
+        "--get-values", "GENERAL.CONNECTION", "device", "show", interface,
+    ], timeout=5.0)
+    connection_name = connection_proc.stdout.strip() if connection_proc.returncode == 0 else ""
+    fallback_active = connection_name == FALLBACK_AP_NAME
+
     scan = _nmcli([
         "--terse", "--escape", "yes",
         "--fields", "IN-USE,SSID,SIGNAL,SECURITY,FREQ,CHAN",
         "device", "wifi", "list", "ifname", interface,
-        "--rescan", "yes" if rescan else "auto",
+        "--rescan", "no" if fallback_active else ("yes" if rescan else "auto"),
     ])
-    if scan.returncode != 0:
+    if scan.returncode != 0 and not fallback_active:
         raise WifiError((scan.stderr or "Wi-Fi scan failed").strip()[:240])
 
+    scan_lines = scan.stdout.splitlines() if scan.returncode == 0 else []
+    scan_cache_age_sec: int | None = None
+    if fallback_active:
+        try:
+            scan_lines.extend(WIFI_SCAN_CACHE.read_text(encoding="utf-8").splitlines())
+            scan_cache_age_sec = max(0, int(time.time() - WIFI_SCAN_CACHE.stat().st_mtime))
+        except OSError:
+            pass
+
     by_network: dict[tuple[str, str], dict[str, Any]] = {}
-    for line in scan.stdout.splitlines():
+    for line in scan_lines:
         fields = split_nmcli_terse(line)
         if len(fields) < 6:
             continue
@@ -120,6 +139,8 @@ def wifi_status(interface: str = "wlan0", *, rescan: bool = False) -> dict[str, 
             if len(fields) < 4 or fields[2] not in {"wifi", "802-11-wireless"}:
                 continue
             name, connection_uuid, _, autoconnect = fields[:4]
+            if name == FALLBACK_AP_NAME:
+                continue
             ssid_proc = _nmcli([
                 "--escape", "no", "--get-values", "802-11-wireless.ssid",
                 "connection", "show", "uuid", connection_uuid,
@@ -139,7 +160,26 @@ def wifi_status(interface: str = "wlan0", *, rescan: bool = False) -> dict[str, 
         "current": active,
         "networks": networks,
         "saved": sorted(saved, key=lambda item: (not item["active"], item["ssid"].lower())),
+        "fallback_access_point": {
+            "active": fallback_active,
+            "ssid": FALLBACK_AP_SSID,
+            "setup_url": "http://10.42.0.1/",
+            "open": True,
+            "dhcp": True,
+            "tokenless_setup": fallback_active,
+            "scan_cache_age_sec": scan_cache_age_sec,
+        },
     }
+
+
+def fallback_client_allowed(remote: str | None, status: dict[str, Any]) -> bool:
+    """Allow initial setup only from a client on the active recovery subnet."""
+    try:
+        address = ipaddress.ip_address((remote or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    fallback = status.get("fallback_access_point") or {}
+    return bool(fallback.get("active") and address in FALLBACK_AP_NETWORK)
 
 
 def token_valid(provided: str | None, token_path: Path = WIFI_TOKEN_PATH) -> bool:

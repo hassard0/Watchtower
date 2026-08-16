@@ -689,8 +689,8 @@ tailwind.config = {
             <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>
           </div>
           <div class="flex-1">
-            <div class="text-base font-semibold">Find-My listener</div>
-            <div class="text-[11px] text-slate-500">Apple Find-My broadcasts in range right now (AirTags, Find-My-enabled accessories, lost AirPods).</div>
+            <div class="text-base font-semibold">Unwanted-tracker listener</div>
+            <div class="text-[11px] text-slate-500">Protocol-confirmed Apple Find My, Tile, and cross-platform DULT broadcasts in range.</div>
           </div>
           <div class="flex items-center gap-1">
             <template x-for="w in [{s:60,l:'1m'},{s:300,l:'5m'},{s:900,l:'15m'}]" :key="w.s">
@@ -710,8 +710,8 @@ tailwind.config = {
             <div class="text-2xl num font-bold text-signal-glow" x-text="findmyData.distinct_count ?? 0"></div>
           </div>
           <div class="bg-ink-700/40 rounded-lg p-3">
-            <div class="text-[10px] uppercase tracking-wider text-slate-500">Owned (with owner nearby)</div>
-            <div class="text-2xl num font-bold text-signal-pulse" x-text="findmyData.by_status?.owned ?? 0"></div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Near owner</div>
+            <div class="text-2xl num font-bold text-signal-pulse" x-text="(findmyData.by_status?.owned ?? 0) + (findmyData.by_status?.['near-owner'] ?? 0)"></div>
           </div>
           <div class="bg-ink-700/40 rounded-lg p-3">
             <div class="text-[10px] uppercase tracking-wider text-slate-500">Separated/lost-mode</div>
@@ -723,7 +723,7 @@ tailwind.config = {
           </div>
         </div>
         <div class="mt-2 text-[10px] text-slate-500">
-          <span class="font-semibold text-slate-400">Note:</span> Apple rotates Find-My keys ~every 15 min so a tracker can show up under multiple addresses across windows. Within a single short window each row ≈ a distinct tracker.
+          <span class="font-semibold text-slate-400">Privacy boundary:</span> Watchtower decodes public tracker state and persistence, not protected owner identity. Use the iOS/Android unwanted-tracker alert alongside this fixed sensor.
         </div>
       </div>
 
@@ -799,7 +799,7 @@ tailwind.config = {
         <div class="flex items-baseline justify-between mb-2">
           <div>
             <div class="text-[10px] uppercase tracking-widest text-slate-500">Stable trackers (clustered across MAC rotations)</div>
-            <div class="text-sm">Inferred owner via co-presence with anchors · last hour</div>
+            <div class="text-sm">Rotation-aware grouping and anchor correlation · last hour</div>
           </div>
           <div class="text-[10px] text-slate-500"><span x-text="findmyClusters.length"></span> clusters</div>
         </div>
@@ -844,9 +844,7 @@ tailwind.config = {
           </template>
         </div>
         <div class="mt-2 text-[10px] text-slate-500">
-          Green ring = inferred owner found via co-presence with an anchor.
-          Red = no anchor matches (potentially stalker tracker if persistent).
-          Numbers show co-presence Jaccard similarity score.
+          Green means this tracker often appears at this sensor when an enrolled anchor does; it does not prove ownership or travel. Red means no correlation. Persistence and separated state carry more alert weight.
         </div>
       </div>
 
@@ -860,7 +858,7 @@ tailwind.config = {
           <thead class="text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-600/40">
             <tr>
               <th class="text-left px-4 py-2 font-medium">Rotating MAC</th>
-              <th class="text-left px-2 py-2 font-medium">Status</th>
+              <th class="text-left px-2 py-2 font-medium">Network / status</th>
               <th class="text-right px-2 py-2 font-medium">RSSI</th>
               <th class="text-right px-2 py-2 font-medium">Sightings</th>
               <th class="text-right px-4 py-2 font-medium">First seen</th>
@@ -877,6 +875,7 @@ tailwind.config = {
                   </div>
                 </td>
                 <td class="px-2 py-2.5">
+                  <span class="text-[10px] uppercase tracking-wider text-slate-400 mr-1" x-text="o.provider || o.family"></span>
                   <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded"
                         :class="findmyStatusClass(o.status)"
                         x-text="o.status || '—'"></span>
@@ -894,9 +893,9 @@ tailwind.config = {
       <div x-show="!tabLoading.findmy && tabsLoaded.findmy && (findmyData.observers || []).length === 0"
            class="glass rounded-2xl p-12 text-center">
         <div class="text-5xl mb-2 opacity-40">🔎</div>
-        <div class="text-sm font-semibold mb-1">No Find-My broadcasts in window</div>
+        <div class="text-sm font-semibold mb-1">No location-tracker broadcasts in window</div>
         <div class="text-[11px] text-slate-500 max-w-md mx-auto">
-          Try a longer window, or wait — AirTags broadcast every ~2 sec when nearby; iPhones+AirPods broadcast Find-My when they've been disconnected from owner recently.
+          Try a longer window or wait. Legacy and DULT-capable trackers advertise periodically; Tile Anti-Theft Mode may intentionally hide from public scans.
         </div>
       </div>
 
@@ -905,7 +904,7 @@ tailwind.config = {
         <div class="flex items-baseline justify-between mb-2">
           <div>
             <div class="text-[10px] uppercase tracking-widest text-slate-500">Daily presence — last 7 days</div>
-            <div class="text-sm">minutes of Find-My activity per day · spikes = persistent tracker</div>
+            <div class="text-sm">minutes of any confirmed tracker activity per day · per-cluster rules prevent unrelated devices from combining into one alert</div>
           </div>
         </div>
         <div class="space-y-1.5">
@@ -922,7 +921,7 @@ tailwind.config = {
           </template>
         </div>
         <div class="mt-3 text-[10px] text-slate-500">
-          The <span class="text-signal-warm font-semibold">warm-orange</span> bars are days with ≥ 180 min of Find-My activity. Three consecutive warm days fires the persistent-tracker rule.
+          The chart shows total radio activity for context. The alert itself now requires the same internal tracker cluster for three consecutive days.
         </div>
       </div>
     </section>
@@ -1175,6 +1174,10 @@ tailwind.config = {
               <span class="num" x-text="` · ${wifi.current?.signal || 0}%`"></span>
             </div>
             <div class="text-[11px] text-signal-warm mt-1" x-show="!wifi.current">Wi-Fi is not currently connected.</div>
+            <div class="text-[11px] text-signal-warm mt-2" x-show="wifi.fallback_access_point?.active">
+              Recovery mode is active. This open hotspot provides DHCP; configure a network here, then reconnect your device to that network.
+              Nearby SSIDs are cached just before hotspot startup and refreshed during known-network retries.
+            </div>
           </div>
           <button @click="loadWifi(true)" :disabled="wifiLoading"
                   class="px-3 py-1.5 rounded-md border border-signal-glow/40 text-signal-glow text-xs disabled:opacity-40">
@@ -1202,7 +1205,7 @@ tailwind.config = {
           </div>
 
           <form @submit.prevent="connectWifi()" class="space-y-3">
-            <div>
+            <div x-show="!wifi.fallback_access_point?.active">
               <label class="text-[10px] uppercase tracking-wider text-slate-500">SSID</label>
               <input type="text" maxlength="32" required x-model="wifiConnectSsid" placeholder="Select above or type a hidden SSID"
                      class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
@@ -1226,7 +1229,10 @@ tailwind.config = {
                      class="mt-1 w-full font-mono bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
               <div class="text-[10px] text-slate-500 mt-1">Stored only in this browser tab. Retrieve once with <span class="font-mono">cat /etc/watchtower/wifi-admin.token</span>.</div>
             </div>
-            <button type="submit" :disabled="wifiBusy || !wifiConnectSsid || !wifiToken"
+            <div x-show="wifi.fallback_access_point?.active" class="text-[10px] text-slate-500">
+              A setup token is not required from a device connected directly to the Watchtower recovery hotspot.
+            </div>
+            <button type="submit" :disabled="wifiBusy || !wifiConnectSsid || (!wifiToken && !wifi.fallback_access_point?.active)"
                     class="w-full px-3 py-2 rounded-md bg-signal-pulse text-ink-900 text-sm font-semibold disabled:opacity-40">
               <span x-text="wifiBusy ? 'applying change…' : 'connect and remember'"></span>
             </button>
@@ -1707,6 +1713,6 @@ tailwind.config = {
   </nav>
 </div>
 
-<script src="/assets/app.js?v=2026050502"></script>
+<script src="/assets/app.js?v=2026081501"></script>
 </body>
 </html>

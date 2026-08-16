@@ -155,7 +155,10 @@ CREATE TABLE IF NOT EXISTS findmy_clusters (
     user_label              TEXT,                          -- user-provided name
     inferred_owner_anchor   TEXT,                          -- entity_id of associated anchor
     inferred_owner_score    REAL,                          -- co-presence correlation 0..1
-    notes                   TEXT
+    notes                   TEXT,
+    tracker_family          TEXT NOT NULL DEFAULT 'apple_findmy',
+    network_provider        TEXT,
+    near_owner              INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_findmy_clusters_last_seen ON findmy_clusters(last_seen_unix);
 CREATE INDEX IF NOT EXISTS idx_findmy_clusters_owner ON findmy_clusters(inferred_owner_anchor);
@@ -204,6 +207,6 @@ CREATE INDEX IF NOT EXISTS idx_findmy_catalog_pubkey ON findmy_key_catalog(pubke
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_mac ON findmy_key_catalog(expected_mac);
 CREATE INDEX IF NOT EXISTS idx_findmy_catalog_slot ON findmy_key_catalog(slot_start_unix);
 
--- Set schema version to 5 (idempotent migration).
-DELETE FROM schema_meta WHERE version < 5;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (5);
+-- Set schema version to 6 (tracker-family metadata + DULT state).
+DELETE FROM schema_meta WHERE version < 6;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (6);

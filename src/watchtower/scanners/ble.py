@@ -11,8 +11,10 @@ from typing import Any
 
 from bleak import BleakScanner
 
-from watchtower.events import Event, EventKind, Features, Scanner as ScannerName
+from watchtower.events import Event, EventKind, Features
+from watchtower.events import Scanner as ScannerName
 from watchtower.flipper import detect_flipper_zero
+from watchtower.location_trackers import detect_location_tracker
 from watchtower.scanners.base import Scanner
 
 log = logging.getLogger(__name__)
@@ -131,6 +133,7 @@ class BleScanner(Scanner):
                 mac = device.address
                 rssi = int(adv.rssi) if adv.rssi is not None else None
                 services = list(adv.service_uuids or [])
+                service_data = {str(k): v.hex() for k, v in (adv.service_data or {}).items()}
                 mfr_hex = _mfr_data_to_hex(adv.manufacturer_data or {})
                 local_name = adv.local_name or device.name
                 # Dedupe key: same MAC + same advertisement content.
@@ -140,7 +143,8 @@ class BleScanner(Scanner):
                 # keys in Apple Continuity, counters in some Samsung msgs) bypass
                 # dedup if included. Use vendor-id + sub-type only (first 6 hex chars).
                 mfr_stable = mfr_hex[:6] if mfr_hex else ""
-                content = (mac, hash((tuple(services), mfr_stable, local_name)))
+                service_stable = tuple(sorted((k, v[:4]) for k, v in service_data.items()))
+                content = (mac, hash((tuple(services), service_stable, mfr_stable, local_name)))
                 now_ts = _time.monotonic()
                 last = self._last_emit.get(content)
                 if last is not None and (now_ts - last) < self.DEDUP_WINDOW_SEC:
@@ -154,6 +158,12 @@ class BleScanner(Scanner):
                     self._last_gc = now_ts
 
                 signature = detect_flipper_zero(local_name, services)
+                tracker = detect_location_tracker(local_name, services, service_data, mfr_hex)
+                decoded = {}
+                if signature:
+                    decoded["device_detection"] = signature
+                if tracker:
+                    decoded["location_tracker"] = tracker
                 feats = Features(
                     mac=mac,
                     rssi=rssi,
@@ -161,9 +171,10 @@ class BleScanner(Scanner):
                     vendor_oui=_vendor_for_oui(mac),
                     is_random_mac=_is_random_mac(mac),
                     service_uuids=services,
+                    service_data_hex=service_data,
                     manufacturer_data_hex=mfr_hex,
                     local_name=local_name,
-                    decoded={"device_detection": signature} if signature else {},
+                    decoded=decoded,
                 )
                 ev = Event(
                     scanner=ScannerName.BLE,
@@ -175,6 +186,7 @@ class BleScanner(Scanner):
                         "rssi": adv.rssi,
                         "tx_power": adv.tx_power,
                         "service_uuids": list(adv.service_uuids or []),
+                        "service_data": service_data,
                         "manufacturer_data": {
                             str(k): v.hex() for k, v in (adv.manufacturer_data or {}).items()
                         },

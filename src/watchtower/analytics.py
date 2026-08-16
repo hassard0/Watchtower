@@ -218,6 +218,10 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
     mac = features.get("mac")
     if not mac:
         return None
+    tracker = (features.get("decoded") or {}).get("location_tracker") or {}
+    if tracker.get("alert_eligible"):
+        family = tracker.get("family") or "unknown"
+        return f"ble:tracker:{family}"
     if features.get("is_random_mac") is False:
         return f"ble:mac:{mac.lower()}"
     name = (features.get("local_name") or "").strip()
@@ -270,6 +274,9 @@ def _classify_entity_kind(scanner: str, kind: str, features: dict) -> str:
         detection = (features.get("decoded") or {}).get("device_detection") or {}
         if detection.get("device_signature") == "flipper_zero":
             return "ble_flipper_zero"
+        tracker = (features.get("decoded") or {}).get("location_tracker") or {}
+        if tracker.get("alert_eligible"):
+            return f"ble_tracker_{tracker.get('family') or 'unknown'}"
         services = features.get("service_uuids") or []
         if any(uuid in services for uuid in ("fd6f",)):
             return "ble_findmy"
@@ -407,6 +414,7 @@ class Analytics:
                 # If this is Apple Continuity, decode and remember most recent state.
                 if scanner == "ble_scanner":
                     mfr_hex = feats.get("manufacturer_data_hex") or ""
+                    tracker_detection = (feats.get("decoded") or {}).get("location_tracker") or {}
                     if mfr_hex.lower().startswith("4c00"):
                         from watchtower.apple_continuity import decode_continuity, short_state_summary
                         decoded = decode_continuity(mfr_hex)
@@ -415,15 +423,17 @@ class Analytics:
                             summary = short_state_summary(decoded)
                             if summary:
                                 e["continuity_state"] = summary
-                    # Find-My-specific cluster tracking (across rotating MACs).
-                    if mfr_hex.lower().startswith("4c0012"):
-                        from watchtower.findmy_clusters import process_findmy_event
+                    # Cross-platform tracker clustering (including rotating MACs).
+                    if tracker_detection.get("alert_eligible"):
+                        from watchtower.findmy_clusters import process_location_tracker_event
                         from watchtower.findmy_owned import match_event as findmy_match_owned
                         try:
-                            cluster_id = process_findmy_event(conn, feats.get("mac"), mfr_hex,
-                                                              feats.get("rssi"), ts_unix)
+                            cluster_id = process_location_tracker_event(
+                                conn, feats.get("mac"), tracker_detection, feats.get("rssi"), ts_unix,
+                            )
                             # Catalog match: is this one of the user's own trackers?
-                            owned = findmy_match_owned(conn, mfr_hex, feats.get("mac"))
+                            owned = (findmy_match_owned(conn, mfr_hex, feats.get("mac"))
+                                     if tracker_detection.get("family") == "apple_findmy" else None)
                             if owned and cluster_id:
                                 # Stamp the cluster as enrolled with the user-given name.
                                 conn.execute(
@@ -887,10 +897,19 @@ class Analytics:
             is_after_hours = hour_utc >= after_start or hour_utc < after_end
 
         def _fire(rule_id, severity, entity_id, score, evidence):
-            existing = conn.execute(
-                "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id IS ? AND ts_unix > ? LIMIT 1",
-                (rule_id, entity_id, recent_threshold),
-            ).fetchone()
+            cluster_id = evidence.get("cluster_id") if isinstance(evidence, dict) else None
+            if cluster_id:
+                existing = conn.execute(
+                    """SELECT 1 FROM alerts
+                       WHERE rule_id = ? AND ts_unix > ?
+                         AND json_extract(evidence_json, '$.cluster_id') = ? LIMIT 1""",
+                    (rule_id, recent_threshold, cluster_id),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id IS ? AND ts_unix > ? LIMIT 1",
+                    (rule_id, entity_id, recent_threshold),
+                ).fetchone()
             if existing:
                 return
             alert_id = str(ULID())
@@ -973,33 +992,42 @@ class Analytics:
                 _fire(rule, "high" if home_state == "away" else "medium",
                       entity_id, 0.8, {"home_state": home_state})
 
-        # ---- Rule 3: AirTag / Find-My broadcast ----
-        # Continuous Find-My presence near the property is worth flagging.
+        # ---- Rule 3: protocol-confirmed location tracker nearby ----
         if S["rule_airtag_findmy_present"]:
-            airtag = conn.execute(
-                """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
-                   FROM entities e
-                   WHERE e.entity_id IN ('ble:apple:Find-My', 'ble:apple:find-my')
-                     AND e.last_seen_unix > ?
-                     AND e.classification IS NULL""",
+            trackers = conn.execute(
+                """SELECT cluster_id, tracker_family, network_provider, first_seen_unix,
+                          last_seen_unix, sighting_count, avg_rssi, last_status, near_owner
+                   FROM findmy_clusters
+                   WHERE last_seen_unix > ? AND classification IS NULL""",
                 (now - 600,),
-            ).fetchone()
-            if airtag:
-                entity_id, last_seen, avg_rssi = airtag
-                # Only fire when the Find-My broadcast is *close* — Apple devices
-                # in range from a neighbor's apartment etc. are noise. Require
-                # avg_rssi > -65 dBm (~10-15m through walls) to alert.
-                if avg_rssi is not None and avg_rssi > -65:
-                    severity = "high" if home_state == "away" else "medium"
-                    _fire("airtag_findmy_present", severity, entity_id, 0.7, {
-                        "avg_rssi": avg_rssi,
-                        "home_state": home_state,
-                        "explanation": (
-                            "Apple Find-My (AirTag / lost AirPods / Find-My-enabled device) "
-                            "broadcasting strongly close to the Pi (RSSI > -65 dBm). "
-                            "If this is yours, mark it as known."
-                        ),
-                    })
+            ).fetchall()
+            from watchtower.location_trackers import tracker_risk
+            for (cluster_id, family, provider, first_seen, last_seen, sightings,
+                 avg_rssi, status, near_owner) in trackers:
+                if near_owner == 1 or avg_rssi is None or avg_rssi <= -65:
+                    continue
+                separated = near_owner == 0 or status in {"separated", "lost-mode", "unowned"}
+                severity, risk = tracker_risk(
+                    {"separated": separated}, avg_rssi=avg_rssi,
+                    age_sec=max(0, last_seen - first_seen), sightings=sightings,
+                )
+                if home_state == "away" and severity == "medium":
+                    severity = "high"
+                _fire("airtag_findmy_present", severity, f"ble:tracker:{family}", risk, {
+                    "cluster_id": cluster_id,
+                    "tracker_family": family,
+                    "network_provider": provider,
+                    "status": status,
+                    "avg_rssi": round(avg_rssi, 1),
+                    "sightings": sightings,
+                    "observed_for_sec": max(0, last_seen - first_seen),
+                    "home_state": home_state,
+                    "explanation": (
+                        "A protocol-confirmed location tracker is strongly in range. "
+                        "Separated state raises concern, but a fixed sensor cannot by itself "
+                        "prove that the device is following a person."
+                    ),
+                })
 
         # ---- Rule 4: first-time visitor at after-hours ----
         # Skip if no anchors are enrolled (we can't reason about who "should" be here).
@@ -1051,52 +1079,65 @@ class Analytics:
                                "with recurring presence. If this is yours, enroll it on the Discover tab.",
             })
 
-        # ---- Rule 7: persistent Find-My tracker (anti-AirTag stalking) ----
-        # Apple Find-My beacon keys rotate every ~15 min so we can't track a
-        # specific AirTag long-term. But we can ask: has *any* Find-My
-        # broadcast been near the Pi for many minutes per day across multiple
-        # consecutive days? If yes, that's strong evidence of a stationary or
-        # following tracker (someone's planted an AirTag on the user's car or
-        # bag, or the user has their own — either way, surface it).
+        # ---- Rule 7: persistent individual tracker cluster ----
         if S.get("rule_findmy_persistent_tracker", True):
             min_min = int(S.get("findmy_persistent_min_minutes_per_day", 180))
             min_days = int(S.get("findmy_persistent_min_consecutive_days", 3))
-            # Count distinct minutes-with-Find-My-events per day for last 7 days.
             rows = conn.execute("""
                 WITH minute_buckets AS (
-                    SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
-                           CAST(ts_unix / 60 AS INTEGER) AS minute_bucket
-                    FROM raw_events
-                    WHERE scanner = 'ble_scanner'
-                      AND ts_unix > strftime('%s','now') - 7 * 86400
-                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                    GROUP BY day, minute_bucket
+                    SELECT m.cluster_id,
+                           date(r.ts_unix, 'unixepoch', 'localtime') AS day,
+                           CAST(r.ts_unix / 60 AS INTEGER) AS minute_bucket
+                    FROM raw_events r
+                    JOIN findmy_cluster_macs m
+                      ON lower(json_extract(r.features_json, '$.mac')) = m.rotating_mac
+                    JOIN findmy_clusters c ON c.cluster_id = m.cluster_id
+                    WHERE r.scanner = 'ble_scanner'
+                      AND r.ts_unix > strftime('%s','now') - 7 * 86400
+                      AND c.classification IS NULL
+                    GROUP BY m.cluster_id, day, minute_bucket
                 )
-                SELECT day, COUNT(*) AS minutes_with_findmy
+                SELECT cluster_id, day, COUNT(*) AS minutes_with_tracker
                 FROM minute_buckets
-                GROUP BY day
-                ORDER BY day DESC
+                GROUP BY cluster_id, day
+                ORDER BY cluster_id, day DESC
             """).fetchall()
-            # Walk back: how many consecutive recent days had >= min_min minutes of Find-My?
-            consecutive = 0
-            for day, minutes in rows:
-                if minutes >= min_min:
-                    consecutive += 1
-                else:
-                    break
-            if consecutive >= min_days:
-                _fire("findmy_persistent_tracker", "high", None, 0.8, {
-                    "consecutive_days": consecutive,
-                    "min_minutes_per_day": min_min,
-                    "recent_days": [{"day": d, "minutes_with_findmy": m} for d, m in rows[:7]],
-                    "explanation": (
-                        f"Apple Find-My beacons (AirTag, lost-AirPods, etc.) have been "
-                        f"in range >= {min_min} min/day for {consecutive} consecutive days. "
-                        f"This means a tracker is persistently near the property. If it's "
-                        f"yours (your wallet/keys/bag), enroll it. If not, someone may have "
-                        f"planted an AirTag on your car or belongings to track you."
-                    ),
-                })
+            by_cluster: dict[str, list[tuple[str, int]]] = defaultdict(list)
+            for cluster_id, day, minutes in rows:
+                by_cluster[cluster_id].append((day, minutes))
+            import datetime
+            today = datetime.date.today()
+            for cluster_id, days in by_cluster.items():
+                by_day = dict(days)
+                consecutive = 0
+                recent_days = []
+                for offset in range(7):
+                    day = (today - datetime.timedelta(days=offset)).isoformat()
+                    minutes = int(by_day.get(day, 0))
+                    recent_days.append({"day": day, "minutes_with_tracker": minutes})
+                    if minutes >= min_min:
+                        consecutive += 1
+                    else:
+                        break
+                if consecutive >= min_days:
+                    meta = conn.execute(
+                        "SELECT tracker_family, network_provider, last_status FROM findmy_clusters WHERE cluster_id = ?",
+                        (cluster_id,),
+                    ).fetchone() or ("unknown", None, None)
+                    _fire("findmy_persistent_tracker", "high", f"ble:tracker:{meta[0]}", 0.85, {
+                        "cluster_id": cluster_id,
+                        "tracker_family": meta[0],
+                        "network_provider": meta[1],
+                        "status": meta[2],
+                        "consecutive_days": consecutive,
+                        "min_minutes_per_day": min_min,
+                        "recent_days": recent_days,
+                        "explanation": (
+                            f"One location-tracker cluster has been in range at least {min_min} "
+                            f"minutes/day for {consecutive} consecutive days. Inspect vehicles "
+                            "and belongings and compare with the phone's unwanted-tracker alert."
+                        ),
+                    })
 
         # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
         if not S["rule_rogue_hotspot"]:

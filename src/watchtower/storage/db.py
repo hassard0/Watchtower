@@ -45,6 +45,15 @@ def init_db(db_path: Path | str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with get_connection(db_path) as conn:
         conn.executescript(_load_schema_sql())
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(findmy_clusters)")}
+        migrations = {
+            "tracker_family": "TEXT NOT NULL DEFAULT 'apple_findmy'",
+            "network_provider": "TEXT",
+            "near_owner": "INTEGER",
+        }
+        for name, declaration in migrations.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE findmy_clusters ADD COLUMN {name} {declaration}")
 
 
 def schema_version(db_path: Path | str) -> int:

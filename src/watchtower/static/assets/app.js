@@ -55,7 +55,7 @@ function watchtower() {
       { id: 'entities',  label: 'Entities',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="11" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M14 21v-2a3 3 0 0 1 3-3h2"/></svg>' },
       { id: 'timeline',  label: 'Timeline',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="3" rx="1"/><rect x="6" y="11" width="12" height="3" rx="1"/><rect x="3" y="16" width="14" height="3" rx="1"/></svg>' },
       { id: 'spectrum',  label: 'Spectrum',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h2l3-9 6 18 3-9h6"/></svg>' },
-      { id: 'findmy',    label: 'Find-My',   icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>' },
+      { id: 'findmy',    label: 'Trackers',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>' },
       { id: 'zones',     label: 'Zones',     icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
       { id: 'alerts',    label: 'Alerts',    icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>' },
       { id: 'settings',  label: 'Settings',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' },
@@ -441,15 +441,15 @@ function watchtower() {
       this.wifiMessage = '';
     },
 
-    async wifiMutation(path, body) {
+    async wifiMutation(path, body, allowRecoverySetup = false) {
       this.saveWifiToken();
-      if (!this.wifiToken.trim()) throw new Error('Enter the Wi-Fi setup token first.');
+      const recoverySetup = allowRecoverySetup && this.wifi.fallback_access_point?.active;
+      if (!this.wifiToken.trim() && !recoverySetup) throw new Error('Enter the Wi-Fi setup token first.');
+      const headers = { 'Content-Type': 'application/json' };
+      if (this.wifiToken.trim()) headers['X-Watchtower-Admin-Token'] = this.wifiToken.trim();
       const r = await fetch(path, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Watchtower-Admin-Token': this.wifiToken.trim(),
-        },
+        headers,
         body: JSON.stringify(body),
       });
       const j = await r.json();
@@ -479,11 +479,17 @@ function watchtower() {
       this.wifiBusy = true;
       this.wifiMessage = `Connecting to ${this.wifiConnectSsid}…`;
       try {
+        const recoverySetup = !!this.wifi.fallback_access_point?.active;
         const queued = await this.wifiMutation('/api/wifi/connect', {
           ssid: this.wifiConnectSsid,
           security: this.wifiConnectSecurity,
           password: this.wifiPassword,
-        });
+        }, true);
+        if (recoverySetup) {
+          this.wifiPassword = '';
+          this.wifiMessage = 'Credentials submitted. The Watchtower hotspot will disappear if the connection succeeds. Join the selected network, then reopen Watchtower on its LAN address.';
+          return;
+        }
         const result = await this.pollWifiResult(queued.request_id);
         this.wifiPassword = '';
         this.wifiMessage = `Connected to ${result.ssid}.`;
@@ -543,8 +549,8 @@ function watchtower() {
         'rule_anchor_absent_unknown_linger': 'Anchor absent + unknown lingering',
         'rule_unknown_keyfob_emission':      'Unknown key-fob emission (sub-GHz)',
         'rule_unknown_garage_emission':      'Unknown garage-door emission (sub-GHz)',
-        'rule_airtag_findmy_present':        'Apple Find-My / AirTag broadcast',
-        'rule_findmy_persistent_tracker':    'Persistent AirTag — anti-stalking',
+        'rule_airtag_findmy_present':        'Nearby location tracker',
+        'rule_findmy_persistent_tracker':    'Persistent tracker — anti-stalking',
         'rule_first_time_visitor_after_hours': 'First-time visitor after hours',
         'rule_close_unknown_signal':         'Strong-signal unknown nearby',
         'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
@@ -557,8 +563,8 @@ function watchtower() {
         'rule_anchor_absent_unknown_linger': 'Fires when an unknown entity is present > linger threshold while no anchor is home.',
         'rule_unknown_keyfob_emission':      'Fires on unrecognized 315/433 MHz key-fob protocol activity.',
         'rule_unknown_garage_emission':      'Fires on unrecognized 315/390 MHz garage-door protocol activity.',
-        'rule_airtag_findmy_present':        'Fires on Apple Find-My broadcasts near the Pi at strong signal.',
-        'rule_findmy_persistent_tracker':    'Fires when Find-My beacons have been near for 3+ hr/day across 3+ consecutive days — suggests a stationary or following AirTag.',
+        'rule_airtag_findmy_present':        'Fires on strong protocol-confirmed Apple, Tile, or cross-platform location-tracker broadcasts.',
+        'rule_findmy_persistent_tracker':    'Fires only when one tracker cluster has been near for 3+ hr/day across 3+ consecutive days.',
         'rule_first_time_visitor_after_hours': 'New entity first-seen after-hours window. Requires at least one anchor enrolled.',
         'rule_close_unknown_signal':         'Mobile BLE device with very strong RSSI and recurring presence.',
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',

@@ -236,19 +236,31 @@ tagged with `_decoded_offline=true`. This trades latency (decode
 happens up to a few seconds after the burst) for **multi-frequency
 coverage from a single SDR**.
 
-### Find-My listener and cluster tracker
+### Unwanted location-tracker listener and clustering
 
-Apple's Find-My network broadcasts have manufacturer-data prefix
-`0x4C 0x00 0x12`. The cluster tracker:
+The passive BLE scanner recognizes three protocol-backed families:
+
+- legacy Apple Find My manufacturer data (`0x4C 0x00 0x12`);
+- Tile-assigned service UUIDs (`0xFD84`, `0xFEEC`, `0xFEED`) and
+  Tile's Bluetooth company ID (`0x067C`);
+- the cross-platform Detecting Unwanted Location Trackers service-data
+  UUID (`0xFCB2`), including network provider and near-owner/separated state.
+
+The cluster tracker:
 
 - Joins **rotating MAC addresses** back into stable cluster IDs by
   matching consecutive observations on RSSI continuity (the
   rotating MAC changes every ~15 minutes but the RSSI doesn't jump).
-- Computes **Jaccard co-presence** between each cluster and each
-  enrolled anchor over a 1-day window — if an AirTag's presence
-  buckets overlap an anchor's by ≥0.55, we infer *probably theirs*.
-- Surfaces the result on the Find-My tab as
-  *"AirTag (probably Ian's)"* vs *"unidentified tracker"*.
+- Computes **Jaccard sensor co-presence** between each cluster and each
+  enrolled anchor over a 1-day window. This is contextual correlation,
+  not proof of ownership or proof that the tracker travelled with a person.
+- Alerts on protocol confidence, separated state, proximity, and the history
+  of each individual cluster. Unrelated neighbors' devices cannot combine
+  into one persistent-tracker alert.
+
+Apple/Tile owner identifiers are deliberately protected. Watchtower does not
+claim to decrypt a stranger's identity; use iOS/Android unwanted-tracker
+alerts for the authorized physical-identification and disablement flow.
 
 ### Find-My owned-tracker catalog
 
@@ -302,8 +314,8 @@ take effect immediately without restart.
 | `anchor_absent_unknown_linger` | An unknown entity has been continuously present for longer than `linger_threshold_sec` (default 600 s) while no anchor is home |
 | `unknown_keyfob_emission` | A sub-GHz **key-fob** protocol was decoded (315 / 433 / 868 MHz, etc.) and we don't have a household device with that protocol fingerprint enrolled |
 | `unknown_garage_emission` | Same, but for garage-door protocols (Liftmaster Security+, Genie Intellicode, Chamberlain, Marantec, Stanley) |
-| `airtag_findmy_present` | An Apple Find-My broadcast was observed, severity scaled by RSSI proximity. *Owned* AirTags suppress the rule |
-| `findmy_persistent_tracker` | A non-owned Find-My cluster has been present for ≥ `findmy_persistent_min_minutes_per_day` (default 180 min) on each of the last `findmy_persistent_min_consecutive_days` (default 3) days. Indicates a tracker hidden in a vehicle / bag |
+| `airtag_findmy_present` | A protocol-confirmed Apple, Tile, or DULT tracker is strongly in range; separated state increases its risk score |
+| `findmy_persistent_tracker` | The same unclassified tracker cluster has been present for ≥ `findmy_persistent_min_minutes_per_day` (default 180 min) on each of the last `findmy_persistent_min_consecutive_days` (default 3) days |
 | `first_time_visitor_after_hours` | New entity first-seen between `after_hours_start_utc` and `after_hours_end_utc` (default 22:00-06:00 UTC). Requires at least one anchor enrolled so a fresh setup doesn't blast alerts |
 | `close_unknown_signal` | Unknown BLE entity with avg RSSI > `close_perimeter_rssi_dbm` (default −50 dBm) and recurring presence (skips stationary IoT) |
 | `rogue_hotspot` | Wi-Fi AP with locally-administered (random) BSSID and strong signal — the smell test for a phone hotspot or rogue access point near the property |
@@ -442,7 +454,11 @@ Open `http://watchtower.local` in a browser.
 Deployment installs `watchtower-wifi-reconnect.timer`. Once a minute, while
 `wlan0` is disconnected, it unblocks the radio and tries every saved
 NetworkManager Wi-Fi profile. Saved profiles retry indefinitely and Wi-Fi
-power saving is disabled. On first install, if NetworkManager has no Wi-Fi
+power saving is disabled. If none connects, the Pi starts an open
+`Watchtower` recovery SSID at `http://10.42.0.1/`; NetworkManager shared mode
+provides DHCP, DNS forwarding, and NAT. The hotspot pauses briefly every five
+minutes to retry known client networks and returns if none connects. On first
+install, if NetworkManager has no Wi-Fi
 profiles, the installer migrates Raspberry Pi Imager's root-only
 `/boot/firmware/network-config` into netplan without copying credentials into
 this repository.
@@ -455,6 +471,11 @@ network configuration. Retrieve the token once on the Pi:
 ```bash
 cat /etc/watchtower/wifi-admin.token
 ```
+
+First-time setup from a client directly connected to the recovery subnet is
+the narrow exception: while the fallback AP is active, a `10.42.0.0/24`
+client may submit one connection without a token. Forgetting profiles and all
+ordinary LAN changes remain token-protected.
 
 The browser keeps that token in `sessionStorage` only. Passwords are handed to
 a root-owned NetworkManager helper through a mode-0600 runtime file, never a

@@ -17,6 +17,7 @@ ACTIVE = RUNTIME / "active.json"
 RESULTS = RUNTIME / "results"
 PROFILES = Path("/etc/NetworkManager/system-connections")
 INTERFACE = "wlan0"
+FALLBACK_AP_NAME = "Watchtower Setup"
 
 
 def run(*args: str, timeout: int = 35) -> subprocess.CompletedProcess[str]:
@@ -53,10 +54,20 @@ def saved_wifi_profiles() -> list[tuple[str, str]]:
             continue
         if kind not in {"wifi", "802-11-wireless"}:
             continue
+        name = run("nmcli", "-g", "connection.id", "connection", "show", "uuid", profile_uuid, timeout=8)
+        mode = run("nmcli", "-g", "802-11-wireless.mode", "connection", "show", "uuid", profile_uuid, timeout=8)
+        if name.stdout.strip() == FALLBACK_AP_NAME or mode.stdout.strip() == "ap":
+            continue
         ssid = run("nmcli", "-g", "802-11-wireless.ssid", "connection", "show", "uuid", profile_uuid, timeout=8)
         if ssid.returncode == 0:
             found.append((profile_uuid, ssid.stdout.strip()))
     return found
+
+
+def restore_fallback_ap() -> None:
+    """Restore setup reachability after rejected credentials."""
+    run("nmcli", "--wait", "20", "connection", "up", "id", FALLBACK_AP_NAME,
+        "ifname", INTERFACE, timeout=25)
 
 
 def connect(request: dict) -> dict:
@@ -115,6 +126,7 @@ def connect(request: dict) -> dict:
     if activated.returncode:
         run("nmcli", "connection", "delete", "uuid", profile_uuid, timeout=12)
         profile_path.unlink(missing_ok=True)
+        restore_fallback_ap()
         message = (activated.stderr or activated.stdout or "connection failed").strip()
         raise RuntimeError(message[:240])
 

@@ -8,6 +8,7 @@ import pytest
 
 from watchtower.wifi import (
     WifiError,
+    fallback_client_allowed,
     queue_request,
     security_kind,
     split_nmcli_terse,
@@ -77,10 +78,20 @@ def test_token_comparison(tmp_path: Path):
     assert not token_valid(None, token)
 
 
+def test_fallback_setup_only_allows_clients_on_active_recovery_subnet():
+    active = {"fallback_access_point": {"active": True}}
+    inactive = {"fallback_access_point": {"active": False}}
+    assert fallback_client_allowed("10.42.0.27", active)
+    assert not fallback_client_allowed("192.168.4.27", active)
+    assert not fallback_client_allowed("10.42.0.27", inactive)
+    assert not fallback_client_allowed(None, active)
+
+
 def test_wifi_status_redacts_credentials():
     from watchtower.wifi import wifi_status
 
     outputs = [
+        (0, "Home profile\n", ""),
         (0, "*:Home:88:WPA2:2412:1\n:Guest:40:--:5180:36\n", ""),
         (0, "Home profile:11111111-1111-1111-1111-111111111111:wifi:yes\n", ""),
         (0, "Home\n", ""),
@@ -97,6 +108,32 @@ def test_wifi_status_redacts_credentials():
     assert status["networks"][1]["security"] == "open"
     assert status["saved"][0]["active"] is True
     assert "password" not in json.dumps(status).lower()
+
+
+def test_recovery_status_merges_pre_hotspot_scan_cache(tmp_path: Path):
+    from watchtower.wifi import wifi_status
+
+    cache = tmp_path / "scan-cache.txt"
+    cache.write_text(":Home:75:WPA2:2412:1\n:BELL645:62:WPA2:5180:36\n")
+    outputs = [
+        (0, "Watchtower Setup\n", ""),
+        (0, "*:Watchtower:0:--:2462:11\n", ""),
+        (0, "Home profile:11111111-1111-1111-1111-111111111111:wifi:yes\n", ""),
+        (0, "Home\n", ""),
+    ]
+
+    def fake_nmcli(args, timeout=20.0):
+        import subprocess
+        rc, stdout, stderr = outputs.pop(0)
+        return subprocess.CompletedProcess(args, rc, stdout, stderr)
+
+    with (
+        patch("watchtower.wifi._nmcli", side_effect=fake_nmcli),
+        patch("watchtower.wifi.WIFI_SCAN_CACHE", cache),
+    ):
+        status = wifi_status(rescan=True)
+    assert status["fallback_access_point"]["active"] is True
+    assert {network["ssid"] for network in status["networks"]} == {"Watchtower", "Home", "BELL645"}
 
 
 def test_networkmanager_keyfile_escaping_preserves_valid_passphrase_symbols():

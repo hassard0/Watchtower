@@ -38,6 +38,7 @@ class Features:
     mac: str | None = None
     vendor_oui: str | None = None
     service_uuids: list[str] = field(default_factory=list)
+    service_data_hex: dict[str, str] = field(default_factory=dict)
     manufacturer_data_hex: str | None = None
     is_random_mac: bool | None = None
     tx_power: int | None = None

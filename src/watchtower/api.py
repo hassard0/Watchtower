@@ -24,6 +24,7 @@ from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
 from watchtower.storage.db import get_connection
 from watchtower.wifi import (
     WifiError,
+    fallback_client_allowed,
     queue_request,
     read_result,
     token_valid,
@@ -1077,9 +1078,14 @@ class ApiServer:
     def _wifi_error(message: str, status: int = 400) -> web.Response:
         return web.json_response({"ok": False, "error": message}, status=status)
 
-    @staticmethod
-    def _wifi_authorized(request: web.Request) -> bool:
-        return token_valid(request.headers.get("X-Watchtower-Admin-Token"))
+    async def _wifi_connect_authorized(self, request: web.Request) -> bool:
+        if token_valid(request.headers.get("X-Watchtower-Admin-Token")):
+            return True
+        try:
+            status = await _offload(wifi_status, rescan=False)
+        except WifiError:
+            return False
+        return fallback_client_allowed(request.remote, status)
 
     async def wifi_get(self, request: web.Request) -> web.Response:
         try:
@@ -1089,7 +1095,7 @@ class ApiServer:
             return self._wifi_error(str(exc), 503)
 
     async def wifi_connect(self, request: web.Request) -> web.Response:
-        if not self._wifi_authorized(request):
+        if not await self._wifi_connect_authorized(request):
             return self._wifi_error("Setup token is missing or invalid", 401)
         try:
             body = await request.json()
@@ -1103,7 +1109,7 @@ class ApiServer:
             return self._wifi_error(str(exc), status)
 
     async def wifi_forget(self, request: web.Request) -> web.Response:
-        if not self._wifi_authorized(request):
+        if not token_valid(request.headers.get("X-Watchtower-Admin-Token")):
             return self._wifi_error("Setup token is missing or invalid", 401)
         try:
             body = await request.json()
@@ -1219,7 +1225,7 @@ class ApiServer:
     # ---- FIND-MY TRACKER ----
 
     async def findmy_observers(self, request: web.Request) -> web.Response:
-        """Live snapshot of nearby Find-My broadcasts.
+        """Live snapshot of protocol-confirmed nearby location trackers.
 
         For each rotating BLE address that emitted a Find-My advertisement in
         the configured window, returns the most-recent state, RSSI, sighting
@@ -1248,11 +1254,16 @@ class ApiServer:
                                AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
                                MIN(ts_unix) AS first_seen,
                                MAX(ts_unix) AS last_seen,
-                               COUNT(*) AS sightings
+                               COUNT(*) AS sightings,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.family')) AS family,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.provider')) AS provider,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.status')) AS tracker_status,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.separated')) AS separated
                         FROM raw_events
                         WHERE scanner = 'ble_scanner'
                           AND ts_unix > ?
-                          AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                          AND (json_extract(features_json, '$.decoded.location_tracker.alert_eligible') = 1
+                               OR substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012')
                         GROUP BY mac
                         ORDER BY max_rssi DESC NULLS LAST
                         LIMIT 100
@@ -1268,7 +1279,8 @@ class ApiServer:
                             FROM raw_events
                             WHERE scanner = 'ble_scanner'
                               AND ts_unix > strftime('%s','now') - 7 * 86400
-                              AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                              AND (json_extract(features_json, '$.decoded.location_tracker.alert_eligible') = 1
+                                   OR substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012')
                             GROUP BY day, bucket
                         )
                         SELECT day, COUNT(*) AS minutes_with_findmy
@@ -1280,8 +1292,12 @@ class ApiServer:
 
         rows, daily = await _offload(_query_observers)
         observers = []
-        for mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings in rows:
-            decoded = decode_continuity(mfr or "")
+        for (mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings,
+             family, provider, tracker_status, separated) in rows:
+            decoded = decode_continuity(mfr or "") if not family or family == "apple_findmy" else {}
+            status = tracker_status or (decoded or {}).get("status")
+            summary = (short_state_summary(decoded) if decoded else
+                       f"{(provider or family or 'location').replace('_', ' ')} tracker · {status or 'unknown'}")
             observers.append({
                 "rotating_mac": mac,
                 "max_rssi": max_rssi,
@@ -1289,9 +1305,12 @@ class ApiServer:
                 "first_seen_unix": first_seen,
                 "last_seen_unix": last_seen,
                 "sightings": sightings,
-                "status": (decoded or {}).get("status"),
+                "family": family or "apple_findmy",
+                "provider": provider or "apple",
+                "status": status,
+                "separated": bool(separated) if separated is not None else status in {"separated", "lost-mode", "unowned"},
                 "maintained": (decoded or {}).get("maintained"),
-                "summary": short_state_summary(decoded) if decoded else "",
+                "summary": summary,
             })
 
         # Group observers by status nibble for quick "owned vs unowned" counts.
@@ -1323,6 +1342,7 @@ class ApiServer:
                            c.sighting_count, c.rotation_count, c.last_rssi, c.avg_rssi,
                            c.last_status, c.last_mac, c.classification, c.user_label,
                            c.inferred_owner_anchor, c.inferred_owner_score, c.notes,
+                           c.tracker_family, c.network_provider, c.near_owner,
                            e.friendly_name AS owner_friendly_name
                     FROM findmy_clusters c
                     LEFT JOIN entities e ON e.entity_id = c.inferred_owner_anchor
@@ -1338,9 +1358,9 @@ class ApiServer:
         for r in rows:
             r["display_label"] = (
                 r.get("user_label")
-                or (f"AirTag (probably {r['owner_friendly_name'] or r['inferred_owner_anchor']}'s)"
+                or (f"{(r.get('network_provider') or r.get('tracker_family') or 'tracker').replace('_', ' ').title()} · anchor-correlated near this sensor"
                     if r.get("inferred_owner_anchor") else None)
-                or f"unidentified tracker · {r['last_status'] or 'unknown'}"
+                or f"{(r.get('network_provider') or r.get('tracker_family') or 'unidentified').replace('_', ' ').title()} tracker · {r['last_status'] or 'unknown'}"
             )
             r["seconds_since_seen"] = now - (r.get("last_seen_unix") or 0)
         return web.json_response({"ts_unix": now, "clusters": rows})

@@ -284,6 +284,9 @@ def _classify_entity_kind(scanner: str, kind: str, features: dict) -> str:
         tracker = (features.get("decoded") or {}).get("location_tracker") or {}
         if tracker.get("alert_eligible"):
             return f"ble_tracker_{tracker.get('family') or 'unknown'}"
+        continuity = (features.get("decoded") or {}).get("apple_continuity") or {}
+        if continuity.get("subtype") in {"proximity-pairing", "airpods-connected"}:
+            return "ble_headphones"
         services = features.get("service_uuids") or []
         if any(uuid in services for uuid in ("fd6f",)):
             return "ble_findmy"

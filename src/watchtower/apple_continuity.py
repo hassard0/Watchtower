@@ -97,7 +97,7 @@ _FINDMY_STATUS: dict[int, str] = {
 
 def _decode_proximity_pairing(payload: bytes) -> dict:
     """0x07 — AirPods / Beats proximity pairing."""
-    out: dict[str, Any] = {"subtype": "proximity-pairing"}
+    out: dict[str, Any] = {}
     if len(payload) < 3:
         return out
     # bytes 0-1: model-id (LE)
@@ -173,7 +173,9 @@ _SUBTYPE_DECODERS: dict[int, tuple[str, Any]] = {
     0x0f: ("nearby-action",     None),
     0x10: ("nearby-info",       _decode_nearby_info),
     0x12: ("find-my",           _decode_find_my),
-    0x16: ("airpods-connected", _decode_proximity_pairing),
+    # Connected-status uses a different payload layout than proximity
+    # pairing. Treating its first two bytes as a model produced bogus codes.
+    0x16: ("airpods-connected", None),
 }
 
 
@@ -209,6 +211,8 @@ def decode_continuity(mfr_data_hex: str) -> dict | None:
             if decoder is not None:
                 try:
                     primary.update(decoder(payload) or {})
+                    # A detail decoder must not change the envelope subtype.
+                    primary["subtype"] = name
                 except Exception:  # noqa: BLE001
                     pass
         i += 2 + seg_len
@@ -238,6 +242,8 @@ def short_state_summary(decoded: dict | None) -> str:
         parts.append(sub)
     if decoded.get("model"):
         parts.append(f"model: {decoded['model']}")
+    elif decoded.get("model_id"):
+        parts.append(f"unresolved model code: {decoded['model_id']}")
     if decoded.get("activity"):
         parts.append(decoded["activity"])
     flags = decoded.get("flags") or []

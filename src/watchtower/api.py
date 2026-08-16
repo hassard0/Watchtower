@@ -104,6 +104,45 @@ def _read_lan_macs() -> set[str]:
     return out
 
 
+def _discovery_candidate_score(candidate: dict[str, Any], lan_macs: set[str]) -> float:
+    """Rank identity usefulness, not raw advertisement spam volume."""
+    observations = max(0, int(candidate.get("total_observations") or 0))
+    score = min(10.0, observations / 100.0)
+    confidence = float(candidate.get("friendly_name_confidence") or 0)
+    source = str(candidate.get("friendly_name_source") or "")
+    if candidate.get("friendly_name"):
+        score += 5
+    if confidence >= 0.90:
+        score += 20
+    elif confidence >= 0.80:
+        score += 10
+    eid = str(candidate.get("entity_id") or "")
+    on_lan = False
+    if eid.startswith("lan:"):
+        score += 8
+        if source.startswith("apple_") or source == "airplay_display_name":
+            score += 15
+        on_lan = eid.startswith("lan:mac:") and eid[8:].lower() in lan_macs
+    elif eid.startswith("ble:mac:"):
+        score += 3
+        on_lan = eid[8:].lower() in lan_macs
+        if on_lan:
+            score += 20
+    elif eid.startswith("ble:named:"):
+        score += 4
+    elif eid.startswith("ble:apple:"):
+        score += (40 if any(token in eid for token in (
+            "proximity-pairing", "airpods-connected",
+        )) else 8)
+    elif eid.startswith("wifi:mac:"):
+        on_lan = eid[9:].lower() in lan_macs
+        if on_lan:
+            score += 15
+    candidate["on_home_wifi"] = on_lan
+    candidate["candidacy_score"] = round(score, 3)
+    return score
+
+
 def _hour_of_week_label(hw: int) -> str:
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return f"{days[hw // 24]} {hw % 24:02d}:00"
@@ -1612,40 +1651,25 @@ class ApiServer:
         with get_connection(self._db) as conn:
             # Surface entities with consistent presence and unknown classification.
             cursor = conn.execute("""
-                SELECT entity_id, scanner, kind, friendly_name, vendor,
+                SELECT entity_id, scanner, kind, friendly_name,
+                       friendly_name_source, friendly_name_confidence, vendor,
                        first_seen_unix, last_seen_unix,
                        visit_count, total_observations,
                        avg_rssi, regularity, anomaly_score, is_random_mac
                 FROM entities
                 WHERE classification IS NULL
-                  AND total_observations >= 50
                   AND last_seen_unix > ?
-                ORDER BY total_observations DESC
-                LIMIT 100
+                  AND (total_observations >= 50
+                       OR COALESCE(friendly_name_confidence, 0) >= 0.90
+                       OR entity_id LIKE 'ble:apple:%')
+                ORDER BY (COALESCE(friendly_name_confidence, 0) >= 0.90) DESC,
+                         total_observations DESC
+                LIMIT 300
             """, (now - 7 * 86400,))
             candidates = [_row_to_dict(cursor, r) for r in cursor.fetchall()]
 
         lan_macs = _read_lan_macs()
         for c in candidates:
-            score = c.get("total_observations", 0) / 100
-            if c.get("friendly_name"):
-                score += 5
-            eid = c.get("entity_id", "")
-            on_lan = False
-            if eid.startswith("ble:mac:"):
-                score += 3
-                if eid[8:].lower() in lan_macs:
-                    score += 20  # huge boost: this device is on your home WiFi
-                    on_lan = True
-            elif eid.startswith("ble:named:"):
-                score += 4
-            elif eid.startswith("ble:apple:"):
-                score += 2
-            elif eid.startswith("wifi:mac:"):
-                if eid[9:].lower() in lan_macs:
-                    score += 15
-                    on_lan = True
-            c["on_home_wifi"] = on_lan
-            c["candidacy_score"] = score
+            _discovery_candidate_score(c, lan_macs)
         candidates.sort(key=lambda c: c["candidacy_score"], reverse=True)
         return web.json_response({"candidates": candidates[:30], "lan_macs": list(lan_macs)})

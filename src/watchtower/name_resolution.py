@@ -206,6 +206,59 @@ def revalidate_name_candidates(conn) -> int:
     return len(invalid)
 
 
+def backfill_apple_audio_groups(conn) -> int:
+    """Make previously grouped Apple audio traffic visible after upgrades."""
+    from watchtower.apple_continuity import decode_continuity
+
+    definitions = (
+        ("ble:apple:proximity-pairing", "Apple proximity accessory",
+         "proximity-pairing", "4c0007"),
+        ("ble:apple:airpods-connected", "Apple audio accessory",
+         "airpods-connected", "4c0016"),
+    )
+    count = 0
+    for canonical_eid, label, subtype, packet_prefix in definitions:
+        entity_rows = conn.execute(
+            "SELECT entity_id FROM entities WHERE lower(entity_id) = ?",
+            (canonical_eid,),
+        ).fetchall()
+        if not entity_rows:
+            continue
+        evidence: dict[str, Any] = {
+            "subtype": subtype,
+            "model_resolved": False,
+            "grouped_observations": True,
+        }
+        raw = conn.execute(
+            """SELECT json_extract(features_json, '$.manufacturer_data_hex')
+               FROM raw_events
+               WHERE scanner = 'ble_scanner'
+                 AND lower(substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6)) = ?
+               ORDER BY ts_unix DESC LIMIT 1""",
+            (packet_prefix,),
+        ).fetchone()
+        decoded = decode_continuity(raw[0]) if raw and raw[0] else None
+        if decoded and decoded.get("model_id"):
+            evidence["model_id"] = decoded["model_id"]
+        for (entity_id,) in entity_rows:
+            conn.execute(
+                """DELETE FROM entity_name_candidates
+                   WHERE entity_id = ? AND source = 'service_fingerprint'
+                     AND name IN ('Apple proximity accessory', 'Apple audio accessory')
+                     AND name != ?""",
+                (entity_id, label),
+            )
+            conn.execute(
+                "UPDATE entities SET kind = 'ble_headphones' WHERE entity_id = ?",
+                (entity_id,),
+            )
+            if record_name_candidate(
+                conn, entity_id, label, "service_fingerprint", evidence=evidence,
+            ):
+                count += 1
+    return count
+
+
 def candidates_from_features(scanner: str, feats: dict[str, Any]) -> list[tuple[str, str, dict]]:
     """Extract disclosed name candidates from one normalized scanner event."""
     decoded = feats.get("decoded") or {}
@@ -216,7 +269,9 @@ def candidates_from_features(scanner: str, feats: dict[str, Any]) -> list[tuple[
         mfr_hex = str(feats.get("manufacturer_data_hex") or "")
         if mfr_hex.casefold().startswith("4c00"):
             from watchtower.apple_continuity import decode_continuity
-            continuity = decoded.get("apple_continuity") or decode_continuity(mfr_hex)
+            # Re-decode from the raw packet so decoder upgrades also correct
+            # historical events whose normalized payload used an older layout.
+            continuity = decode_continuity(mfr_hex) or decoded.get("apple_continuity")
             if feats.get("local_name"):
                 out.append((feats["local_name"], "apple_ble_local_name",
                             {"protocol": "apple_continuity"}))
@@ -225,6 +280,19 @@ def candidates_from_features(scanner: str, feats: dict[str, Any]) -> list[tuple[
                 if continuity.get("model_id"):
                     evidence["model_id"] = continuity["model_id"]
                 out.append((continuity["model"], "apple_continuity_model", evidence))
+            elif continuity and continuity.get("subtype") in {
+                "proximity-pairing", "airpods-connected",
+            }:
+                subtype = continuity["subtype"]
+                evidence = {
+                    "subtype": subtype,
+                    "model_resolved": False,
+                }
+                if continuity.get("model_id"):
+                    evidence["model_id"] = continuity["model_id"]
+                label = ("Apple audio accessory" if subtype == "airpods-connected"
+                         else "Apple proximity accessory")
+                out.append((label, "service_fingerprint", evidence))
         for item in decoded.get("authorized_names") or []:
             if isinstance(item, dict) and item.get("name") and item.get("source"):
                 out.append((item["name"], item["source"], item.get("evidence") or {}))

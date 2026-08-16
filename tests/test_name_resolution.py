@@ -1,7 +1,9 @@
 """Tests for local, provenance-preserving friendly-name resolution."""
+import json
 from pathlib import Path
 
 from watchtower.name_resolution import (
+    backfill_apple_audio_groups,
     candidates_for_entity,
     candidates_from_features,
     clean_name,
@@ -110,6 +112,28 @@ def test_feature_extraction_promotes_disclosed_apple_name_and_continuity_model()
             {"subtype": "proximity-pairing", "model_id": "0x2420"}) in candidates
 
 
+def test_unresolved_apple_audio_packet_gets_honest_visible_label():
+    candidates = candidates_from_features("ble_scanner", {
+        "manufacturer_data_hex": "4c000703067900",
+        "decoded": {},
+    })
+    assert ("Apple proximity accessory", "service_fingerprint", {
+        "subtype": "proximity-pairing", "model_resolved": False,
+        "model_id": "0x7906",
+    }) in candidates
+
+
+def test_raw_packet_redecode_corrects_stale_continuity_metadata():
+    candidates = candidates_from_features("ble_scanner", {
+        "manufacturer_data_hex": "4c00160400112233",
+        "decoded": {"apple_continuity": {"subtype": "proximity-pairing",
+                                           "model_id": "0x1100"}},
+    })
+    assert ("Apple audio accessory", "service_fingerprint", {
+        "subtype": "airpods-connected", "model_resolved": False,
+    }) in candidates
+
+
 def test_schema_has_name_provenance(tmp_path: Path):
     db = tmp_path / "names.db"
     init_db(db)
@@ -141,3 +165,30 @@ def test_revalidation_removes_old_factory_identifiers(tmp_path: Path):
             "SELECT friendly_name, friendly_name_source FROM entities WHERE entity_id=?", (eid,),
         ).fetchone()
     assert selected == (None, None)
+
+
+def test_existing_apple_audio_group_is_backfilled_with_latest_model_code(tmp_path: Path):
+    db = tmp_path / "names.db"
+    init_db(db)
+    with get_connection(db) as conn:
+        eid = _entity(conn, "ble:apple:proximity-pairing")
+        record_name_candidate(
+            conn, eid, "Apple audio accessory", "service_fingerprint",
+            evidence={"subtype": "airpods-connected"},
+        )
+        conn.execute(
+            """INSERT INTO raw_events
+                   (event_id,ts,ts_unix,scanner,kind,features_json,raw_json)
+               VALUES ('event-1','1970-01-01T00:01:40Z',100,'ble_scanner','ble_adv',?,'{}')""",
+            (json.dumps({"manufacturer_data_hex": "4c000703067900"}),),
+        )
+        assert backfill_apple_audio_groups(conn) == 1
+        selected = conn.execute(
+            "SELECT kind,friendly_name,friendly_name_source FROM entities WHERE entity_id=?",
+            (eid,),
+        ).fetchone()
+        candidate = candidates_for_entity(conn, eid)[0]
+        names = [item["name"] for item in candidates_for_entity(conn, eid)]
+    assert selected == ("ble_headphones", "Apple proximity accessory", "service_fingerprint")
+    assert candidate["evidence"]["model_id"] == "0x7906"
+    assert names == ["Apple proximity accessory"]

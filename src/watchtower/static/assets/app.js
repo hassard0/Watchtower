@@ -751,6 +751,30 @@ function watchtower() {
       } catch (e) { console.warn('openEntity', e); }
     },
 
+    isAppleProximity(entity) {
+      const eid = entity?.entity_id || '';
+      return eid.startsWith('ble:apple:proximity-pairing') ||
+        eid.startsWith('ble:apple:airpods-connected') ||
+        entity?.kind === 'ble_headphones' && eid.startsWith('ble:apple:');
+    },
+
+    nameEvidenceLabel(candidate) {
+      const evidence = candidate?.evidence || {};
+      const bits = [];
+      if (evidence.model_id) bits.push(`model code ${evidence.model_id}`);
+      if (evidence.model_identifier) bits.push(evidence.model_identifier);
+      if (evidence.subtype) bits.push(evidence.subtype.replace(/-/g, ' '));
+      if (evidence.model_resolved === false) bits.push('unresolved');
+      return [...new Set(bits)].join(' · ');
+    },
+
+    openAppleIdentify() {
+      this.entityDetail = null;
+      this.tab = 'settings';
+      this.identityMessage = 'Put the AirPods in pairing mode until the light flashes white, then run scan / identify AirPods.';
+      this.$nextTick(() => document.getElementById('identity-controls')?.scrollIntoView({behavior: 'smooth'}));
+    },
+
     probing: false,
     probeResult: null,
     async probeEntity() {

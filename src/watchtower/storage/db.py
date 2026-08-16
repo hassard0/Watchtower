@@ -79,8 +79,12 @@ def init_db(db_path: Path | str) -> None:
                       first_seen_unix, COALESCE(friendly_name_updated_unix, last_seen_unix), '{}'
                FROM entities WHERE friendly_name IS NOT NULL"""
         )
-        from watchtower.name_resolution import revalidate_name_candidates
+        from watchtower.name_resolution import (
+            backfill_apple_audio_groups,
+            revalidate_name_candidates,
+        )
         revalidate_name_candidates(conn)
+        backfill_apple_audio_groups(conn)
 
 
 def schema_version(db_path: Path | str) -> int:

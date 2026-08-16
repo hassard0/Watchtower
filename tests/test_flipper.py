@@ -36,3 +36,8 @@ def test_analytics_classifies_detection():
         "service_uuids": ["3080"],
     }
     assert _classify_entity_kind("ble_scanner", "ble_adv", features) == "ble_flipper_zero"
+
+
+def test_analytics_classifies_apple_audio_continuity():
+    features = {"decoded": {"apple_continuity": {"subtype": "airpods-connected"}}}
+    assert _classify_entity_kind("ble_scanner", "ble_adv", features) == "ble_headphones"

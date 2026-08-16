@@ -98,6 +98,18 @@ def test_feature_extraction_covers_ble_wifi_and_public_signatures():
     assert ("Acme AX10", "wifi_wps_model", {}) in wifi
 
 
+def test_feature_extraction_promotes_disclosed_apple_name_and_continuity_model():
+    candidates = candidates_from_features("ble_scanner", {
+        "local_name": "Ian's AirPods",
+        "manufacturer_data_hex": "4c000703202400",
+        "decoded": {},
+    })
+    assert ("Ian's AirPods", "apple_ble_local_name",
+            {"protocol": "apple_continuity"}) in candidates
+    assert ("AirPods Pro 2", "apple_continuity_model",
+            {"subtype": "proximity-pairing", "model_id": "0x2420"}) in candidates
+
+
 def test_schema_has_name_provenance(tmp_path: Path):
     db = tmp_path / "names.db"
     init_db(db)

@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from watchtower.apple_names import APPLE_DNS_SD_TYPES, analyze_apple_service
 from watchtower.bluetooth_identity import (
     ingest_bluez_devices,
     list_bluez_devices,
@@ -59,7 +60,7 @@ def read_dhcp_names() -> list[dict[str, str]]:
     return out
 
 
-def discover_mdns(timeout_sec: float = 2.5) -> list[dict[str, str]]:
+def discover_mdns(timeout_sec: float = 4.0) -> list[dict[str, Any]]:
     try:
         from zeroconf import (
             ServiceBrowser,
@@ -69,7 +70,7 @@ def discover_mdns(timeout_sec: float = 2.5) -> list[dict[str, str]]:
         )
     except ImportError:
         return []
-    found: list[dict[str, str]] = []
+    found: dict[tuple[str, str, str], dict[str, Any]] = {}
     zc = Zeroconf()
 
     class Listener(ServiceListener):
@@ -84,11 +85,26 @@ def discover_mdns(timeout_sec: float = 2.5) -> list[dict[str, str]]:
                     properties[bytes(key).decode("utf-8", "replace")] = bytes(value).decode("utf-8", "replace")
                 except (TypeError, ValueError):
                     continue
-            display_name = properties.get("fn") or properties.get("name") or instance
+            analyzed = analyze_apple_service(
+                service_type, instance, (info.server or "").rstrip("."), properties,
+            )
             for address in info.parsed_scoped_addresses():
-                found.append({"ip": address.split("%")[0], "name": display_name,
-                              "service": service_type, "host": (info.server or "").rstrip("."),
-                              "modelName": properties.get("md", "")})
+                ip = address.split("%")[0]
+                item = {
+                    "ip": ip,
+                    "name": analyzed["name"],
+                    "source": analyzed["source"],
+                    "service": service_type,
+                    "host": (info.server or "").rstrip("."),
+                    "modelName": analyzed["model"] or properties.get("md", ""),
+                    "model": analyzed["model"],
+                    "manufacturer": analyzed["manufacturer"],
+                    "apple_hardware": analyzed["apple_hardware"],
+                    "service_mac": analyzed["device_mac"],
+                    "bluetooth_mac": analyzed["bluetooth_mac"],
+                    "evidence": analyzed["evidence"],
+                }
+                found[(service_type, instance, ip)] = item
 
         def update_service(self, zeroconf, service_type, name):
             self.add_service(zeroconf, service_type, name)
@@ -98,16 +114,17 @@ def discover_mdns(timeout_sec: float = 2.5) -> list[dict[str, str]]:
 
     browsers = []
     try:
-        types = ZeroconfServiceTypes.find(zc=zc, timeout=min(1.5, timeout_sec))
+        types = set(ZeroconfServiceTypes.find(zc=zc, timeout=min(1.5, timeout_sec)))
+        types.update(APPLE_DNS_SD_TYPES)
         listener = Listener()
-        for service_type in list(types)[:40]:
+        for service_type in sorted(types):
             browsers.append(ServiceBrowser(zc, service_type, listener))
         time.sleep(max(0.5, timeout_sec - 1.0))
     finally:
         for browser in browsers:
             browser.cancel()
         zc.close()
-    return found
+    return list(found.values())
 
 
 def _private_ip(value: str) -> bool:
@@ -190,16 +207,24 @@ def ingest_lan_names(db_path: Path | str, observations: list[dict[str, Any]],
     host_macs: dict[str, str] = {}
     for item in observations:
         host = str(item.get("host") or "").strip().lower()
-        mac = str(item.get("mac") or neighbors.get(str(item.get("ip") or "")) or "").lower()
-        if host and _MAC.fullmatch(mac):
-            host_macs[host] = mac
+        strong_mac = str(
+            item.get("mac") or neighbors.get(str(item.get("ip") or "")) or ""
+        ).lower()
+        service_mac = str(item.get("service_mac") or "").lower()
+        if host and _MAC.fullmatch(strong_mac):
+            # An address observed in ARP belongs to the interface actually
+            # serving this host and outranks an AirPlay logical/device ID.
+            host_macs[host] = strong_mac
+        elif host and _MAC.fullmatch(service_mac):
+            host_macs.setdefault(host, service_mac)
     now = int(time.time())
     count = 0
     with get_connection(db_path) as conn:
         for item in observations:
             ip = str(item.get("ip") or "")
             host = str(item.get("host") or "").strip().lower()
-            mac = str(item.get("mac") or neighbors.get(ip) or host_macs.get(host) or "").lower()
+            mac = str(item.get("mac") or neighbors.get(ip) or host_macs.get(host)
+                      or item.get("service_mac") or "").lower()
             if not ip and not _MAC.fullmatch(mac):
                 continue
             eid = (f"lan:mac:{mac}" if _MAC.fullmatch(mac) else
@@ -215,8 +240,33 @@ def ingest_lan_names(db_path: Path | str, observations: list[dict[str, Any]],
             name = item.get("name")
             if source == "mdns_service_name":
                 name = normalize_mdns_instance(name)
-            evidence = {k: item[k] for k in ("ip", "host", "service", "manufacturer", "modelName") if item.get(k)}
+            evidence = dict(item.get("evidence") or {})
+            evidence.update({
+                k: item[k]
+                for k in ("ip", "host", "service", "manufacturer", "modelName")
+                if item.get(k)
+            })
             if record_name_candidate(conn, eid, name, source, evidence=evidence):
+                count += 1
+            model_source = ("apple_bonjour_model" if item.get("apple_hardware")
+                            else "bonjour_model")
+            if item.get("model") and record_name_candidate(
+                conn, eid, item["model"], model_source, evidence=evidence,
+            ):
+                count += 1
+
+            # AirPlay can disclose its current Bluetooth address. Propagate a
+            # name only when that exact address already exists as a BLE entity.
+            bluetooth_mac = str(item.get("bluetooth_mac") or "").lower()
+            ble_eid = f"ble:mac:{bluetooth_mac}"
+            if (_MAC.fullmatch(bluetooth_mac)
+                    and conn.execute(
+                        "SELECT 1 FROM entities WHERE entity_id = ?", (ble_eid,),
+                    ).fetchone()
+                    and record_name_candidate(
+                        conn, ble_eid, name, "apple_bonjour_bluetooth_link",
+                        evidence={**evidence, "linked_via": "bonjour_bluetooth_address"},
+                    )):
                 count += 1
     return count
 
@@ -245,8 +295,7 @@ def discover_and_ingest_lan(db_path: Path | str) -> int:
         except (socket.herror, socket.gaierror, OSError):
             continue
         observations.append({"ip": ip, "mac": mac, "name": hostname, "source": "reverse_dns"})
-    for item in discover_mdns():
-        observations.append({**item, "source": "mdns_service_name"})
+    observations.extend(discover_mdns())
     for item in discover_upnp():
         observations.append({**item, "name": item.get("friendlyName"), "source": "upnp_friendly_name"})
     return ingest_lan_names(db_path, observations, neighbors)

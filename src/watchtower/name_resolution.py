@@ -18,10 +18,22 @@ SOURCE_CONFIDENCE: dict[str, float] = {
     "fast_pair_personalized_name": 0.995,
     "ble_ead_local_name": 0.99,
     "bluez_paired_alias": 0.985,
+    "apple_companion_name": 0.975,
+    "apple_bonjour_bluetooth_link": 0.970,
+    "airplay_display_name": 0.965,
+    "apple_device_info_name": 0.960,
+    "apple_mobile_device_name": 0.955,
+    "homekit_accessory_name": 0.950,
     "ble_irk_identity": 0.98,
     "ble_gatt_device_name": 0.96,
     "bluetooth_remote_name": 0.93,
+    "apple_bonjour_host_name": 0.925,
     "mdns_service_name": 0.92,
+    "apple_sleep_proxy_name": 0.90,
+    "apple_ble_local_name": 0.90,
+    "apple_continuity_model": 0.88,
+    "apple_bonjour_model": 0.86,
+    "bonjour_model": 0.84,
     "upnp_friendly_name": 0.92,
     "dhcp_hostname": 0.86,
     "reverse_dns": 0.75,
@@ -201,6 +213,18 @@ def candidates_from_features(scanner: str, feats: dict[str, Any]) -> list[tuple[
     if scanner == "ble_scanner":
         if feats.get("local_name"):
             out.append((feats["local_name"], "ble_advertised_name", {}))
+        mfr_hex = str(feats.get("manufacturer_data_hex") or "")
+        if mfr_hex.casefold().startswith("4c00"):
+            from watchtower.apple_continuity import decode_continuity
+            continuity = decoded.get("apple_continuity") or decode_continuity(mfr_hex)
+            if feats.get("local_name"):
+                out.append((feats["local_name"], "apple_ble_local_name",
+                            {"protocol": "apple_continuity"}))
+            if continuity and continuity.get("model"):
+                evidence = {"subtype": continuity.get("subtype")}
+                if continuity.get("model_id"):
+                    evidence["model_id"] = continuity["model_id"]
+                out.append((continuity["model"], "apple_continuity_model", evidence))
         for item in decoded.get("authorized_names") or []:
             if isinstance(item, dict) and item.get("name") and item.get("source"):
                 out.append((item["name"], item["source"], item.get("evidence") or {}))

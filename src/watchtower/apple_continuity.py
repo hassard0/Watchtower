@@ -22,10 +22,8 @@ Subtypes most useful for device fingerprinting / state-aware grouping:
         but we can detect the broadcast as a signal that an AirTag /
         lost-AirPods / Find-My-enabled accessory is present.
 
-  0x05/0x09 AirDrop / Handoff — partial activity hints.
-
-Reference: community-maintained at https://github.com/furiousMAC/continuity
-(documentation only; this is a clean-room implementation).
+  0x05/0x09 AirDrop / Handoff — partial activity hints. Contact hashes and
+        rotating authentication material are deliberately not retained.
 """
 from __future__ import annotations
 
@@ -38,7 +36,6 @@ _AIRPODS_MODEL_IDS: dict[int, str] = {
     0x0220: "AirPods",
     0x0F20: "AirPods (Gen 2)",
     0x1320: "AirPods (Gen 3)",
-    0x1420: "AirPods Pro",
     0x1420: "AirPods Pro",
     0x0E20: "AirPods Pro",
     0x2420: "AirPods Pro 2",
@@ -155,12 +152,10 @@ def _decode_handoff(payload: bytes) -> dict:
 
 
 def _decode_airdrop(payload: bytes) -> dict:
-    """0x05 — AirDrop discovery hash list (truncated SHA256s of contact info)."""
+    """0x05 — AirDrop presence without retaining contact-derived hashes."""
     out: dict[str, Any] = {"subtype": "airdrop"}
-    if len(payload) >= 8:
-        # Up to 4× 2-byte hashes of contact entries (phone, email, contact-record)
-        out["hash_count"] = (len(payload) - 1) // 2
-        out["contact_hashes"] = [payload[i:i+2].hex() for i in range(0, len(payload), 2)][:4]
+    if payload:
+        out["payload_length"] = len(payload)
     return out
 
 
@@ -190,7 +185,10 @@ def decode_continuity(mfr_data_hex: str) -> dict | None:
     """
     if not mfr_data_hex or not mfr_data_hex.lower().startswith("4c00"):
         return None
-    raw = bytes.fromhex(mfr_data_hex)
+    try:
+        raw = bytes.fromhex(mfr_data_hex)
+    except (TypeError, ValueError):
+        return None
     if len(raw) < 4:
         return None
     # Strip the 0x4C00 vendor id prefix.

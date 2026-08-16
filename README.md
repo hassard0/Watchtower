@@ -188,8 +188,16 @@ Crucial extras:
 - **Apple Continuity decoder** — Apple devices broadcast a 0x4C00
   manufacturer-data prefix with an inner subtype byte. We decode
   AirDrop / AirPlay / Find-My / Nearby-Info / Proximity-Pairing
-  (with a 25-model lookup table) and surface the human-readable
-  state under the entity row.
+  model and state fields and surface them under the entity row. Rotating
+  authentication and contact-derived hash material is not retained.
+- **Apple ecosystem name fusion** — Bonjour discovery explicitly queries
+  AirPlay, RAOP, Companion Link, device-info, mobile-device, sleep-proxy,
+  and HomeKit services. Watchtower separates human service-instance names
+  from models and opaque identifiers, normalizes RAOP prefixes, and records
+  every result with protocol provenance. When Apple publishes an exact
+  Bluetooth address in local-link TXT metadata, the name is copied to an
+  already-observed matching BLE entity; no fuzzy or rotation-breaking join
+  is attempted.
 
 ### Wi-Fi scanner (`wlan0`)
 

@@ -30,6 +30,12 @@ class LoggingCfg:
 
 
 @dataclass
+class ApiCfg:
+    host: str = "0.0.0.0"
+    port: int = 80
+
+
+@dataclass
 class BleCfg:
     enabled: bool = True
     adapter: str = "hci0"
@@ -52,6 +58,7 @@ class SubGhzCfg:
         "-F", "json", "-d", "0",
         "-M", "stats:1:60",  # periodic stats record so a quiet RF environment is distinguishable from a stuck tuner
         "-M", "level",       # signal level on every event
+        "-M", "protocol",    # stable rtl_433 decoder number for historical correlation
     ])
 
 
@@ -84,6 +91,7 @@ class Config:
     storage: StorageCfg = field(default_factory=StorageCfg)
     bus: BusCfg = field(default_factory=BusCfg)
     logging: LoggingCfg = field(default_factory=LoggingCfg)
+    api: ApiCfg = field(default_factory=ApiCfg)
     scanners: ScannersCfg = field(default_factory=ScannersCfg)
 
 
@@ -111,6 +119,7 @@ def load_config(path: Path | str) -> Config:
         storage=_merge(StorageCfg(), raw.get("storage")),
         bus=_merge(BusCfg(), raw.get("bus")),
         logging=_merge(LoggingCfg(), raw.get("logging")),
+        api=_merge(ApiCfg(), raw.get("api")),
         scanners=ScannersCfg(
             ble=_merge(BleCfg(), sc_raw.get("ble")),
             wifi=_merge(WifiCfg(), sc_raw.get("wifi")),

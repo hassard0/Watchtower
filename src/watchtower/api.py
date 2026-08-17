@@ -1,7 +1,7 @@
 """HTTP API + dashboard server.
 
-Embedded in the watchtower process as an asyncio task. Listens on
-0.0.0.0:8080 by default. Serves:
+Embedded in the watchtower process as an asyncio task. The deployment binds
+it to 127.0.0.1:8080 behind the private-HTTPS nginx endpoint. Serves:
   - JSON API at /api/*
   - Static SPA dashboard at /
   - Mobile probe UI at /probe
@@ -21,7 +21,26 @@ from ulid import ULID
 
 from watchtower.active_probe import probe_one, _apply_probe_result
 from watchtower.analytics import DEFAULT_SETTINGS, load_settings, save_settings
+from watchtower.name_resolution import candidates_for_entity, set_user_name
+from watchtower.name_crypto import KeyVaultError, NameKeyVault
+from watchtower.bluetooth_identity import (
+    fetch_fast_pair_name,
+    ingest_bluez_devices,
+    list_bluez_devices,
+    pair_device,
+    read_ead_key_material,
+    scan_classic,
+)
 from watchtower.storage.db import get_connection
+from watchtower.wifi import (
+    WifiError,
+    fallback_client_allowed,
+    queue_request,
+    read_result,
+    token_valid,
+    validate_connect_request,
+    wifi_status,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,13 +104,52 @@ def _read_lan_macs() -> set[str]:
     return out
 
 
+def _discovery_candidate_score(candidate: dict[str, Any], lan_macs: set[str]) -> float:
+    """Rank identity usefulness, not raw advertisement spam volume."""
+    observations = max(0, int(candidate.get("total_observations") or 0))
+    score = min(10.0, observations / 100.0)
+    confidence = float(candidate.get("friendly_name_confidence") or 0)
+    source = str(candidate.get("friendly_name_source") or "")
+    if candidate.get("friendly_name"):
+        score += 5
+    if confidence >= 0.90:
+        score += 20
+    elif confidence >= 0.80:
+        score += 10
+    eid = str(candidate.get("entity_id") or "")
+    on_lan = False
+    if eid.startswith("lan:"):
+        score += 8
+        if source.startswith("apple_") or source == "airplay_display_name":
+            score += 15
+        on_lan = eid.startswith("lan:mac:") and eid[8:].lower() in lan_macs
+    elif eid.startswith("ble:mac:"):
+        score += 3
+        on_lan = eid[8:].lower() in lan_macs
+        if on_lan:
+            score += 20
+    elif eid.startswith("ble:named:"):
+        score += 4
+    elif eid.startswith("ble:apple:"):
+        score += (40 if any(token in eid for token in (
+            "proximity-pairing", "airpods-connected",
+        )) else 8)
+    elif eid.startswith("wifi:mac:"):
+        on_lan = eid[9:].lower() in lan_macs
+        if on_lan:
+            score += 15
+    candidate["on_home_wifi"] = on_lan
+    candidate["candidacy_score"] = round(score, 3)
+    return score
+
+
 def _hour_of_week_label(hw: int) -> str:
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return f"{days[hw // 24]} {hw % 24:02d}:00"
 
 
 class ApiServer:
-    def __init__(self, db_path: Path | str, host: str = "0.0.0.0", port: int = 8080) -> None:
+    def __init__(self, db_path: Path | str, host: str = "0.0.0.0", port: int = 80) -> None:
         self._db = Path(db_path)
         self._host = host
         self._port = port
@@ -135,9 +193,25 @@ class ApiServer:
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
         self._app.router.add_get("/api/recap", self.recap)
+        self._app.router.add_get("/api/presence", self.presence)
         # Settings
         self._app.router.add_get("/api/settings", self.settings_get)
         self._app.router.add_post("/api/settings", self.settings_set)
+        # NetworkManager-backed Wi-Fi controls. Mutation endpoints require the
+        # setup token stored root-side in /etc/watchtower/wifi-admin.token.
+        self._app.router.add_get("/api/wifi", self.wifi_get)
+        self._app.router.add_post("/api/wifi/connect", self.wifi_connect)
+        self._app.router.add_post("/api/wifi/forget", self.wifi_forget)
+        self._app.router.add_get("/api/wifi/results/{request_id}", self.wifi_result)
+        # Authorized local identity/decryption controls. All routes require
+        # the same root-owned setup token as Wi-Fi mutations.
+        self._app.router.add_get("/api/name-keys", self.name_keys_list)
+        self._app.router.add_post("/api/name-keys", self.name_keys_add)
+        self._app.router.add_delete("/api/name-keys/{key_id}", self.name_keys_delete)
+        self._app.router.add_get("/api/bluetooth/devices", self.bluetooth_devices)
+        self._app.router.add_post("/api/bluetooth/scan", self.bluetooth_scan)
+        self._app.router.add_post("/api/bluetooth/pair", self.bluetooth_pair)
+        self._app.router.add_post("/api/bluetooth/fast-pair-name", self.bluetooth_fast_pair_name)
         # Admin / database tools
         self._app.router.add_post("/api/admin/reset-entities", self.admin_reset_entities)
         self._app.router.add_post("/api/admin/test-ntfy", self.admin_test_ntfy)
@@ -157,6 +231,8 @@ class ApiServer:
         self._stopping = False
         self._pause_scanner_factory = None
         self._findmy_tracker = None
+        self._ble_adapter = "hci0"
+        self._name_vault = NameKeyVault(self._db)
 
     def set_pause_scanner_factory(self, factory) -> None:
         """Inject a coordinator so on-demand probes can pause the BLE scanner."""
@@ -165,6 +241,9 @@ class ApiServer:
     def set_findmy_tracker(self, tracker) -> None:
         """Inject the FindMyTracker so /api/findmy can expose the keypair."""
         self._findmy_tracker = tracker
+
+    def set_ble_adapter(self, adapter: str) -> None:
+        self._ble_adapter = adapter
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app, access_log=None)
@@ -468,8 +547,10 @@ class ApiServer:
 
     async def entities(self, request: web.Request) -> web.Response:
         order = request.query.get("order", "active")
-        limit = int(request.query.get("limit", "200"))
-        scope = request.query.get("scope", "all")  # all|active|anomalous|unknown|enrolled
+        limit = max(1, min(1000, int(request.query.get("limit", "200"))))
+        offset = max(0, int(request.query.get("offset", "0")))
+        search = request.query.get("q", "").strip()[:100]
+        scope = request.query.get("scope", "recent")  # recent|active|anomalous|unknown|enrolled|all
         now = int(time.time())
         order_sql = {
             "active": "last_seen_unix DESC",
@@ -480,6 +561,7 @@ class ApiServer:
         }.get(order, "last_seen_unix DESC")
         scope_where = {
             "all": "1=1",
+            "recent": "last_seen_unix > strftime('%s','now') - 604800",
             # 300 s matches the widened `currently_present` window — see the
             # comment near `r["currently_present"] = ...` below.
             "active": "last_seen_unix > strftime('%s','now') - 300",
@@ -487,23 +569,40 @@ class ApiServer:
             "unknown": "classification IS NULL",
             "enrolled": "classification IS NOT NULL",
         }.get(scope, "1=1")
+        where_sql = scope_where
+        where_params: list[Any] = []
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            needle = f"%{escaped}%"
+            where_sql = (
+                f"({scope_where}) AND (entity_id LIKE ? ESCAPE '\\' "
+                "OR COALESCE(friendly_name,'') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(vendor,'') LIKE ? ESCAPE '\\')"
+            )
+            where_params.extend((needle, needle, needle))
         db_path = self._db
 
         def _query():
             with get_connection(db_path) as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM entities WHERE {where_sql}",
+                    where_params,
+                ).fetchone()[0]
                 cursor = conn.execute(f"""
-                    SELECT entity_id, scanner, kind, friendly_name, classification,
+                    SELECT entity_id, scanner, kind, friendly_name,
+                           friendly_name_source, friendly_name_confidence,
+                           friendly_name_updated_unix, classification,
                            first_seen_unix, last_seen_unix, visit_count, total_observations,
                            avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
                            vendor, is_random_mac
                     FROM entities
-                    WHERE {scope_where}
+                    WHERE {where_sql}
                     ORDER BY {order_sql}
-                    LIMIT ?
-                """, (limit,))
-                return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+                    LIMIT ? OFFSET ?
+                """, (*where_params, limit, offset))
+                return [_row_to_dict(cursor, r) for r in cursor.fetchall()], total
 
-        rows = await _offload(_query)
+        rows, total = await _offload(_query)
         for r in rows:
             r["seconds_since_seen"] = now - (r["last_seen_unix"] or 0)
             # 300 s window instead of 120 s. Analytics step occasionally takes
@@ -513,13 +612,18 @@ class ApiServer:
             # is wide enough to absorb routine lag while still being "current"
             # by any practical definition.
             r["currently_present"] = r["seconds_since_seen"] < 300
-        return web.json_response({"entities": rows, "ts_unix": now})
+        return web.json_response({
+            "entities": rows, "total": total, "limit": limit, "offset": offset,
+            "scope": scope, "query": search, "ts_unix": now,
+        })
 
     async def entity_detail(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
         with get_connection(self._db) as conn:
             cursor = conn.execute("""
-                SELECT entity_id, scanner, kind, friendly_name, classification,
+                SELECT entity_id, scanner, kind, friendly_name,
+                       friendly_name_source, friendly_name_confidence,
+                       friendly_name_updated_unix, classification,
                        first_seen_unix, last_seen_unix, visit_count, total_observations,
                        avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
                        vendor, is_random_mac, notes_inferred
@@ -529,6 +633,7 @@ class ApiServer:
             if not row:
                 return web.json_response({"error": "entity not found"}, status=404)
             entity = _row_to_dict(cursor, row)
+            name_candidates = candidates_for_entity(conn, eid)
 
             visits_cursor = conn.execute("""
                 SELECT visit_id, start_unix, end_unix, duration_sec, observation_count, avg_rssi, max_rssi
@@ -548,7 +653,8 @@ class ApiServer:
                 LIMIT 10
             """, (eid, eid))
             copresence = [_row_to_dict(copresence_cursor, r) for r in copresence_cursor.fetchall()]
-        return web.json_response({"entity": entity, "visits": visits, "copresence": copresence})
+        return web.json_response({"entity": entity, "name_candidates": name_candidates,
+                                  "visits": visits, "copresence": copresence})
 
     async def classify_entity(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
@@ -568,15 +674,18 @@ class ApiServer:
     async def rename_entity(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
         body = await request.json()
-        name = (body.get("friendly_name") or "").strip() or None
+        requested_name = body.get("friendly_name")
         with get_connection(self._db) as conn:
-            cur = conn.execute(
-                "UPDATE entities SET friendly_name = ? WHERE entity_id = ?",
-                (name, eid),
-            )
-            if cur.rowcount == 0:
+            if not conn.execute("SELECT 1 FROM entities WHERE entity_id = ?", (eid,)).fetchone():
                 return web.json_response({"error": "entity not found"}, status=404)
-        return web.json_response({"ok": True, "friendly_name": name})
+            set_user_name(conn, eid, requested_name)
+            row = conn.execute(
+                """SELECT friendly_name, friendly_name_source, friendly_name_confidence
+                   FROM entities WHERE entity_id = ?""", (eid,),
+            ).fetchone()
+        return web.json_response({"ok": True, "friendly_name": row[0],
+                                  "friendly_name_source": row[1],
+                                  "friendly_name_confidence": row[2]})
 
     async def probe_entity(self, request: web.Request) -> web.Response:
         """Synchronously fire a GATT probe at the entity's MAC and return the result.
@@ -671,6 +780,81 @@ class ApiServer:
 
         rows = await _offload(_query)
         return web.json_response({"alerts": rows, "ts_unix": now_unix})
+
+    async def presence(self, request: web.Request) -> web.Response:
+        """Recent anonymous BLE flows and explainable intrusion episodes."""
+        now = int(time.time())
+        minutes = max(5, min(1440, int(request.query.get("minutes", "30"))))
+        since = now - minutes * 60
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                track_cursor = conn.execute(
+                    """SELECT tracklet_id,label,first_seen_unix,last_seen_unix,
+                              observation_count,address_count,first_rssi,last_rssi,
+                              avg_rssi,max_rssi,state,confidence,evidence_json
+                       FROM presence_tracklets WHERE last_seen_unix>=?
+                       ORDER BY last_seen_unix DESC LIMIT 100""",
+                    (since,),
+                )
+                track_cols = [col[0] for col in track_cursor.description]
+                tracklets = []
+                for row in track_cursor.fetchall():
+                    item = dict(zip(track_cols, row))
+                    try:
+                        item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+                    except (TypeError, ValueError):
+                        item["evidence"] = {}
+                    first_rssi = item.get("first_rssi")
+                    last_rssi = item.get("last_rssi")
+                    item["rssi_change_db"] = (
+                        last_rssi - first_rssi
+                        if first_rssi is not None and last_rssi is not None else None
+                    )
+                    item["currently_present"] = item["last_seen_unix"] >= now - 120
+                    tracklets.append(item)
+
+                episode_cursor = conn.execute(
+                    """SELECT episode_id,start_unix,last_seen_unix,status,score,
+                              severity,home_state,signal_types_json,evidence_json,alert_id
+                       FROM intrusion_episodes WHERE last_seen_unix>=?
+                       ORDER BY last_seen_unix DESC LIMIT 50""",
+                    (since,),
+                )
+                episode_cols = [col[0] for col in episode_cursor.description]
+                episodes = []
+                for row in episode_cursor.fetchall():
+                    item = dict(zip(episode_cols, row))
+                    for source, target, fallback in (
+                        ("signal_types_json", "signal_types", []),
+                        ("evidence_json", "evidence", {}),
+                    ):
+                        try:
+                            item[target] = json.loads(item.pop(source) or json.dumps(fallback))
+                        except (TypeError, ValueError):
+                            item[target] = fallback
+                    episodes.append(item)
+                return tracklets, episodes
+
+        tracklets, episodes = await _offload(_query)
+        current_episode = next(
+            (episode for episode in episodes
+             if episode["status"] in {"observing", "alerted"}
+             and episode["last_seen_unix"] >= now - 300),
+            None,
+        )
+        return web.json_response({
+            "ts_unix": now, "window_minutes": minutes,
+            "active_tracklets": sum(1 for item in tracklets if item["currently_present"]),
+            "rotating_tracklets": sum(1 for item in tracklets if item["address_count"] > 1),
+            "tracklets": tracklets, "episodes": episodes,
+            "current_episode": current_episode,
+            "limitations": (
+                "Tracklets are short-lived radio-flow correlations, not permanent identities. "
+                "Episode scores combine behaviors and do not identify a person."
+            ),
+        })
 
     async def alert_feedback(self, request: web.Request) -> web.Response:
         aid = request.match_info["aid"]
@@ -1059,6 +1243,180 @@ class ApiServer:
         save_settings(self._db, current)
         return web.json_response({"ok": True, "settings": current})
 
+    @staticmethod
+    def _wifi_error(message: str, status: int = 400) -> web.Response:
+        return web.json_response({"ok": False, "error": message}, status=status)
+
+    async def _wifi_connect_authorized(self, request: web.Request) -> bool:
+        if token_valid(request.headers.get("X-Watchtower-Admin-Token")):
+            return True
+        try:
+            status = await _offload(wifi_status, rescan=False)
+        except WifiError:
+            return False
+        return fallback_client_allowed(request.remote, status)
+
+    async def wifi_get(self, request: web.Request) -> web.Response:
+        try:
+            rescan = request.query.get("rescan", "0").lower() in {"1", "true", "yes"}
+            return web.json_response(await _offload(wifi_status, rescan=rescan))
+        except WifiError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def wifi_connect(self, request: web.Request) -> web.Response:
+        if not await self._wifi_connect_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise WifiError("Expected a JSON object")
+            payload = validate_connect_request(body)
+            request_id = queue_request("connect", payload)
+            return web.json_response({"ok": True, "request_id": request_id}, status=202)
+        except (WifiError, json.JSONDecodeError) as exc:
+            status = 409 if "already in progress" in str(exc) else 400
+            return self._wifi_error(str(exc), status)
+
+    async def wifi_forget(self, request: web.Request) -> web.Response:
+        if not token_valid(request.headers.get("X-Watchtower-Admin-Token")):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            profile_uuid = str((body or {}).get("uuid") or "").strip()
+            if not profile_uuid:
+                raise WifiError("Saved profile UUID is required")
+            request_id = queue_request("forget", {"uuid": profile_uuid})
+            return web.json_response({"ok": True, "request_id": request_id}, status=202)
+        except (WifiError, json.JSONDecodeError, AttributeError) as exc:
+            status = 409 if "already in progress" in str(exc) else 400
+            return self._wifi_error(str(exc), status)
+
+    # ---- AUTHORIZED NAME KEYS + BLUETOOTH ----
+
+    @staticmethod
+    def _admin_authorized(request: web.Request) -> bool:
+        return token_valid(request.headers.get("X-Watchtower-Admin-Token"))
+
+    async def name_keys_list(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        return web.json_response({"keys": await _offload(self._name_vault.list_public)})
+
+    async def name_keys_add(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            metadata = body.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                raise KeyVaultError("metadata must be an object")
+            key = await _offload(
+                self._name_vault.add,
+                label=body.get("label"), key_type=body.get("key_type"),
+                secret_hex=body.get("secret"), scope=body.get("scope") or "*",
+                metadata=metadata,
+            )
+            return web.json_response({"ok": True, "key": key}, status=201)
+        except (KeyVaultError, json.JSONDecodeError, AttributeError) as exc:
+            return self._wifi_error(str(exc), 400)
+
+    async def name_keys_delete(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        deleted = await _offload(self._name_vault.delete, request.match_info["key_id"])
+        return web.json_response({"ok": True, "deleted": deleted})
+
+    async def bluetooth_devices(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            devices = await _offload(list_bluez_devices)
+            await _offload(ingest_bluez_devices, self._db, devices)
+            return web.json_response({"devices": devices})
+        except RuntimeError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def bluetooth_scan(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    devices = await _offload(scan_classic, 10)
+            else:
+                devices = await _offload(scan_classic, 10)
+            await _offload(ingest_bluez_devices, self._db, devices)
+            return web.json_response({"ok": True, "devices": devices})
+        except RuntimeError as exc:
+            return self._wifi_error(str(exc), 503)
+
+    async def bluetooth_pair(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            address = str(body.get("address") or "").upper()
+            device = await _offload(pair_device, address)
+            await _offload(ingest_bluez_devices, self._db, [device])
+            # If the paired device authorizes EAD key-material reads, store it
+            # directly in the encrypted vault without returning it to the API.
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    material = await read_ead_key_material(address, self._ble_adapter)
+            else:
+                material = await read_ead_key_material(address, self._ble_adapter)
+            imported = False
+            if material:
+                self._name_vault.add(
+                    label=f"{device.get('alias') or device.get('name') or address} EAD",
+                    key_type="ble_ead", secret_hex=material.hex(), scope=address,
+                    metadata={"source": "authenticated_pairing", "address": address},
+                )
+                imported = True
+            return web.json_response({"ok": True, "device": device, "ead_key_imported": imported})
+        except (ValueError, RuntimeError, json.JSONDecodeError, KeyVaultError) as exc:
+            return self._wifi_error(str(exc), 400)
+
+    async def bluetooth_fast_pair_name(self, request: web.Request) -> web.Response:
+        if not self._admin_authorized(request):
+            return self._wifi_error("Setup token is missing or invalid", 401)
+        try:
+            body = await request.json()
+            address = str(body.get("address") or "").upper()
+            keys = self._name_vault.enabled("fast_pair_account")
+            if self._pause_scanner_factory:
+                async with await self._pause_scanner_factory():
+                    name, key_id = await fetch_fast_pair_name(address, keys, self._ble_adapter)
+            else:
+                name, key_id = await fetch_fast_pair_name(address, keys, self._ble_adapter)
+            now = int(time.time())
+            eid = f"ble:mac:{address.lower()}"
+            with get_connection(self._db) as conn:
+                conn.execute(
+                    """INSERT INTO entities(entity_id,scanner,kind,first_seen_unix,last_seen_unix,visit_count,total_observations,is_random_mac)
+                       VALUES (?,'ble_scanner','ble_device',?,?,0,1,0)
+                       ON CONFLICT(entity_id) DO UPDATE SET last_seen_unix=excluded.last_seen_unix""",
+                    (eid, now, now),
+                )
+                record_name_candidate(
+                    conn, eid, name, "fast_pair_personalized_name",
+                    evidence={"key_id": key_id, "authenticated": True, "address": address},
+                )
+            self._name_vault.mark_used(key_id)
+            return web.json_response({"ok": True, "entity_id": eid, "name": name,
+                                      "source": "fast_pair_personalized_name"})
+        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            return self._wifi_error(str(exc), 400)
+
+    async def wifi_result(self, request: web.Request) -> web.Response:
+        try:
+            result = read_result(request.match_info["request_id"])
+            if result is None:
+                return web.json_response({"ok": True, "pending": True}, status=202)
+            return web.json_response(result)
+        except WifiError as exc:
+            return self._wifi_error(str(exc), 400)
+
     # ---- RECAP ----
 
     async def recap(self, request: web.Request) -> web.Response:
@@ -1082,6 +1440,7 @@ class ApiServer:
                        avg_rssi, total_observations, anomaly_score
                 FROM entities
                 WHERE first_seen_unix >= ?
+                  AND COALESCE(is_random_mac, 0) != 1
                 ORDER BY total_observations DESC LIMIT 30
             """, (since,)).fetchall()
             departed_entities = conn.execute("""
@@ -1090,6 +1449,7 @@ class ApiServer:
                 FROM entities
                 WHERE last_seen_unix BETWEEN ? AND ?
                   AND last_seen_unix < ? - 600
+                  AND COALESCE(is_random_mac, 0) != 1
                 ORDER BY last_seen_unix DESC LIMIT 30
             """, (since, now, now)).fetchall()
             alert_counts = conn.execute("""
@@ -1153,7 +1513,7 @@ class ApiServer:
     # ---- FIND-MY TRACKER ----
 
     async def findmy_observers(self, request: web.Request) -> web.Response:
-        """Live snapshot of nearby Find-My broadcasts.
+        """Live snapshot of protocol-confirmed nearby location trackers.
 
         For each rotating BLE address that emitted a Find-My advertisement in
         the configured window, returns the most-recent state, RSSI, sighting
@@ -1182,11 +1542,16 @@ class ApiServer:
                                AVG(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS avg_rssi,
                                MIN(ts_unix) AS first_seen,
                                MAX(ts_unix) AS last_seen,
-                               COUNT(*) AS sightings
+                               COUNT(*) AS sightings,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.family')) AS family,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.provider')) AS provider,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.status')) AS tracker_status,
+                               MAX(json_extract(features_json, '$.decoded.location_tracker.separated')) AS separated
                         FROM raw_events
                         WHERE scanner = 'ble_scanner'
                           AND ts_unix > ?
-                          AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                          AND (json_extract(features_json, '$.decoded.location_tracker.alert_eligible') = 1
+                               OR substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012')
                         GROUP BY mac
                         ORDER BY max_rssi DESC NULLS LAST
                         LIMIT 100
@@ -1202,7 +1567,8 @@ class ApiServer:
                             FROM raw_events
                             WHERE scanner = 'ble_scanner'
                               AND ts_unix > strftime('%s','now') - 7 * 86400
-                              AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
+                              AND (json_extract(features_json, '$.decoded.location_tracker.alert_eligible') = 1
+                                   OR substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012')
                             GROUP BY day, bucket
                         )
                         SELECT day, COUNT(*) AS minutes_with_findmy
@@ -1214,8 +1580,12 @@ class ApiServer:
 
         rows, daily = await _offload(_query_observers)
         observers = []
-        for mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings in rows:
-            decoded = decode_continuity(mfr or "")
+        for (mac, mfr, max_rssi, avg_rssi, first_seen, last_seen, sightings,
+             family, provider, tracker_status, separated) in rows:
+            decoded = decode_continuity(mfr or "") if not family or family == "apple_findmy" else {}
+            status = tracker_status or (decoded or {}).get("status")
+            summary = (short_state_summary(decoded) if decoded else
+                       f"{(provider or family or 'location').replace('_', ' ')} tracker · {status or 'unknown'}")
             observers.append({
                 "rotating_mac": mac,
                 "max_rssi": max_rssi,
@@ -1223,9 +1593,12 @@ class ApiServer:
                 "first_seen_unix": first_seen,
                 "last_seen_unix": last_seen,
                 "sightings": sightings,
-                "status": (decoded or {}).get("status"),
+                "family": family or "apple_findmy",
+                "provider": provider or "apple",
+                "status": status,
+                "separated": bool(separated) if separated is not None else status in {"separated", "lost-mode", "unowned"},
                 "maintained": (decoded or {}).get("maintained"),
-                "summary": short_state_summary(decoded) if decoded else "",
+                "summary": summary,
             })
 
         # Group observers by status nibble for quick "owned vs unowned" counts.
@@ -1257,6 +1630,7 @@ class ApiServer:
                            c.sighting_count, c.rotation_count, c.last_rssi, c.avg_rssi,
                            c.last_status, c.last_mac, c.classification, c.user_label,
                            c.inferred_owner_anchor, c.inferred_owner_score, c.notes,
+                           c.tracker_family, c.network_provider, c.near_owner,
                            e.friendly_name AS owner_friendly_name
                     FROM findmy_clusters c
                     LEFT JOIN entities e ON e.entity_id = c.inferred_owner_anchor
@@ -1272,9 +1646,9 @@ class ApiServer:
         for r in rows:
             r["display_label"] = (
                 r.get("user_label")
-                or (f"AirTag (probably {r['owner_friendly_name'] or r['inferred_owner_anchor']}'s)"
+                or (f"{(r.get('network_provider') or r.get('tracker_family') or 'tracker').replace('_', ' ').title()} · anchor-correlated near this sensor"
                     if r.get("inferred_owner_anchor") else None)
-                or f"unidentified tracker · {r['last_status'] or 'unknown'}"
+                or f"{(r.get('network_provider') or r.get('tracker_family') or 'unidentified').replace('_', ' ').title()} tracker · {r['last_status'] or 'unknown'}"
             )
             r["seconds_since_seen"] = now - (r.get("last_seen_unix") or 0)
         return web.json_response({"ts_unix": now, "clusters": rows})
@@ -1375,41 +1749,39 @@ class ApiServer:
         now = int(time.time())
         with get_connection(self._db) as conn:
             # Surface entities with consistent presence and unknown classification.
+            eligibility_sql = """
+                classification IS NULL
+                AND last_seen_unix > ?
+                AND (total_observations >= 50
+                     OR COALESCE(friendly_name_confidence, 0) >= 0.90
+                     OR entity_id LIKE 'ble:apple:%')
+            """
+            eligible_count = conn.execute(
+                f"SELECT COUNT(*) FROM entities WHERE {eligibility_sql}",
+                (now - 7 * 86400,),
+            ).fetchone()[0]
             cursor = conn.execute("""
-                SELECT entity_id, scanner, kind, friendly_name, vendor,
+                SELECT entity_id, scanner, kind, friendly_name,
+                       friendly_name_source, friendly_name_confidence, vendor,
                        first_seen_unix, last_seen_unix,
                        visit_count, total_observations,
                        avg_rssi, regularity, anomaly_score, is_random_mac
                 FROM entities
                 WHERE classification IS NULL
-                  AND total_observations >= 50
                   AND last_seen_unix > ?
-                ORDER BY total_observations DESC
-                LIMIT 100
+                  AND (total_observations >= 50
+                       OR COALESCE(friendly_name_confidence, 0) >= 0.90
+                       OR entity_id LIKE 'ble:apple:%')
+                ORDER BY (COALESCE(friendly_name_confidence, 0) >= 0.90) DESC,
+                         total_observations DESC
             """, (now - 7 * 86400,))
             candidates = [_row_to_dict(cursor, r) for r in cursor.fetchall()]
 
         lan_macs = _read_lan_macs()
         for c in candidates:
-            score = c.get("total_observations", 0) / 100
-            if c.get("friendly_name"):
-                score += 5
-            eid = c.get("entity_id", "")
-            on_lan = False
-            if eid.startswith("ble:mac:"):
-                score += 3
-                if eid[8:].lower() in lan_macs:
-                    score += 20  # huge boost: this device is on your home WiFi
-                    on_lan = True
-            elif eid.startswith("ble:named:"):
-                score += 4
-            elif eid.startswith("ble:apple:"):
-                score += 2
-            elif eid.startswith("wifi:mac:"):
-                if eid[9:].lower() in lan_macs:
-                    score += 15
-                    on_lan = True
-            c["on_home_wifi"] = on_lan
-            c["candidacy_score"] = score
+            _discovery_candidate_score(c, lan_macs)
         candidates.sort(key=lambda c: c["candidacy_score"], reverse=True)
-        return web.json_response({"candidates": candidates[:30], "lan_macs": list(lan_macs)})
+        return web.json_response({
+            "candidates": candidates, "eligible_count": eligible_count,
+            "limit": None, "lan_macs": list(lan_macs),
+        })

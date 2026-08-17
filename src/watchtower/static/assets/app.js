@@ -1,11 +1,31 @@
 // Watchtower dashboard logic. Alpine.js component.
+const DISCOVERY_CACHE_KEY = 'watchtower.discovery.v2';
+const DISCOVERY_REFRESH_MS = 60 * 1000;
+const DISCOVERY_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+
 function watchtower() {
   return {
     state: { entities: {}, scanners: [], baseline_progress: {}, alerts_unack_24h: 0 },
     entities: [],
+    entityTotal: 0,
+    entityOffset: 0,
+    entityLimit: 1000,
+    entitySearch: '',
     alerts: [],
     visits: [],
     discoveryCandidates: [],
+    discoveryFiltered: [],
+    discoveryEligibleCount: 0,
+    discoverySearch: '',
+    discoverySource: 'all',
+    discoveryNamed: 'all',
+    discoveryMinObservations: 0,
+    discoverySort: 'rank',
+    discoveryRenderLimit: 100,
+    discoveryFetchedAt: 0,
+    discoveryCacheState: 'empty',
+    discoveryLoading: false,
+    _discoveryFetchPromise: null,
     discoveryProbing: {},
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
@@ -28,7 +48,21 @@ function watchtower() {
     settings: {},
     settingsSchema: {},
     settingsDirty: false,
+    wifi: { current: null, networks: [], saved: [] },
+    wifiLoading: false,
+    wifiBusy: false,
+    wifiToken: '',
+    wifiConnectSsid: '',
+    wifiConnectSecurity: 'wpa2',
+    wifiPassword: '',
+    wifiMessage: '',
+    nameKeys: [],
+    bluetoothDevices: [],
+    identityBusy: false,
+    identityMessage: '',
+    identityKey: { label: '', key_type: 'fast_pair_account', scope: '*', secret: '' },
     recap: null,
+    presence: { active_tracklets: 0, rotating_tracklets: 0, tracklets: [], episodes: [], current_episode: null },
     recapHours: 8,
     toasts: [],
     _seenAlertIds: new Set(),
@@ -37,7 +71,7 @@ function watchtower() {
     loading: false,
     now: '',
     tab: 'overview',
-    entityScope: 'active',
+    entityScope: 'recent',
     entityOrder: 'active',
     timelineHours: 24,
 
@@ -47,18 +81,19 @@ function watchtower() {
       { id: 'entities',  label: 'Entities',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="11" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M14 21v-2a3 3 0 0 1 3-3h2"/></svg>' },
       { id: 'timeline',  label: 'Timeline',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="3" rx="1"/><rect x="6" y="11" width="12" height="3" rx="1"/><rect x="3" y="16" width="14" height="3" rx="1"/></svg>' },
       { id: 'spectrum',  label: 'Spectrum',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h2l3-9 6 18 3-9h6"/></svg>' },
-      { id: 'findmy',    label: 'Find-My',   icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>' },
+      { id: 'findmy',    label: 'Trackers',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>' },
       { id: 'zones',     label: 'Zones',     icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
       { id: 'alerts',    label: 'Alerts',    icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>' },
       { id: 'settings',  label: 'Settings',  icon: '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' },
     ],
 
     scopeBtns: [
+      { id: 'recent',     label: 'Recent 7d' },
       { id: 'active',     label: 'Active now' },
       { id: 'anomalous',  label: 'Anomalous' },
       { id: 'unknown',    label: 'Unknown' },
       { id: 'enrolled',   label: 'Enrolled' },
-      { id: 'all',        label: 'All' },
+      { id: 'all',        label: 'All history' },
     ],
 
     windowBtns: [
@@ -84,9 +119,17 @@ function watchtower() {
         const saved = localStorage.getItem('watchtower.tab');
         if (saved && this.tabs.find(t => t.id === saved)) this.tab = saved;
       } catch (e) {}
+      try { this.wifiToken = sessionStorage.getItem('watchtower.wifiToken') || ''; } catch (e) {}
+      this.restoreDiscoveryCache();
       this.$watch('tab', v => {
         try { localStorage.setItem('watchtower.tab', v); } catch (e) {}
       });
+      for (const key of [
+        'discoverySearch', 'discoverySource', 'discoveryNamed',
+        'discoveryMinObservations', 'discoverySort',
+      ]) {
+        this.$watch(key, () => this.applyDiscoveryFilters());
+      }
       this.refresh();
       setInterval(() => { this.tick(); }, 1000);
       setInterval(() => { this.refresh(); }, 5000);
@@ -108,8 +151,9 @@ function watchtower() {
         if (tab === 'zones')     tasks.push(this.loadZones());
         if (tab === 'discover')  tasks.push(this.loadDiscovery());
         if (tab === 'findmy')    tasks.push(this.loadFindmy());
-        if (tab === 'overview')  tasks.push(this.loadRecap());
+        if (tab === 'overview')  tasks.push(this.loadRecap(), this.loadPresence());
         if (tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
+        if (tab === 'settings') tasks.push(this.loadWifi(false));
         await Promise.all(tasks);
         this.tabsLoaded = { ...this.tabsLoaded, [tab]: true };
       } finally {
@@ -147,9 +191,16 @@ function watchtower() {
 
     async loadEntities() {
       try {
-        const r = await this._fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`, 6000);
+        const query = new URLSearchParams({
+          scope: this.entityScope, order: this.entityOrder,
+          limit: String(this.entityLimit), offset: String(this.entityOffset),
+          q: this.entitySearch,
+        });
+        const r = await this._fetch(`/api/entities?${query}`, 6000);
         const j = await r.json();
         const incoming = j.entities || [];
+        this.entityTotal = Number(j.total ?? incoming.length);
+        this.entityOffset = Number(j.offset ?? this.entityOffset);
         // Don't blow away a previously-good entity list with a momentarily
         // empty response — that caused the radar to flicker between
         // populated and "no signals" on every refresh tick during analytics
@@ -166,6 +217,13 @@ function watchtower() {
         }
         this.tabsLoaded = { ...this.tabsLoaded, entities: true };
       } catch (e) { console.warn('loadEntities', e.name); }
+    },
+
+    entityPage(delta) {
+      const next = Math.max(0, this.entityOffset + delta * this.entityLimit);
+      if (next >= this.entityTotal && delta > 0) return;
+      this.entityOffset = next;
+      this.loadEntities();
     },
 
     async loadAlerts() {
@@ -357,13 +415,109 @@ function watchtower() {
       } catch (e) { console.warn('loadZones', e); }
     },
 
-    async loadDiscovery() {
+    restoreDiscoveryCache() {
       try {
-        const r = await fetch('/api/discovery');
-        const j = await r.json();
-        this.discoveryCandidates = j.candidates || [];
+        const cached = JSON.parse(localStorage.getItem(DISCOVERY_CACHE_KEY) || 'null');
+        const age = Date.now() - Number(cached?.fetched_at || 0);
+        if (!cached || cached.version !== 2 || !Array.isArray(cached.candidates)
+            || age < 0 || age > DISCOVERY_CACHE_MAX_AGE_MS) return;
+        this.discoveryCandidates = cached.candidates;
+        this.discoveryEligibleCount = Number(cached.eligible_count ?? cached.candidates.length);
+        this.discoveryFetchedAt = Number(cached.fetched_at);
+        this.discoveryCacheState = 'cached';
+        this.applyDiscoveryFilters();
         this.tabsLoaded = { ...this.tabsLoaded, discover: true };
-      } catch (e) { console.warn('loadDiscovery', e); }
+      } catch (e) {
+        try { localStorage.removeItem(DISCOVERY_CACHE_KEY); } catch (_ignored) {}
+      }
+    },
+
+    saveDiscoveryCache() {
+      try {
+        localStorage.setItem(DISCOVERY_CACHE_KEY, JSON.stringify({
+          version: 2, fetched_at: this.discoveryFetchedAt,
+          eligible_count: this.discoveryEligibleCount,
+          candidates: this.discoveryCandidates,
+        }));
+      } catch (e) {
+        console.warn('discovery cache unavailable', e.name);
+      }
+    },
+
+    async loadDiscovery(force = false) {
+      const fresh = this.discoveryCandidates.length > 0
+        && (Date.now() - this.discoveryFetchedAt) < DISCOVERY_REFRESH_MS;
+      if (!force && fresh) {
+        this.tabsLoaded = { ...this.tabsLoaded, discover: true };
+        return;
+      }
+      if (this._discoveryFetchPromise) return this._discoveryFetchPromise;
+      this.discoveryLoading = true;
+      this._discoveryFetchPromise = (async () => {
+        try {
+          const r = await this._fetch('/api/discovery', 10000);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          this.discoveryCandidates = j.candidates || [];
+          this.discoveryEligibleCount = Number(j.eligible_count ?? this.discoveryCandidates.length);
+          this.discoveryFetchedAt = Date.now();
+          this.discoveryCacheState = 'live';
+          this.applyDiscoveryFilters(false);
+          this.saveDiscoveryCache();
+          this.tabsLoaded = { ...this.tabsLoaded, discover: true };
+        } catch (e) {
+          if (this.discoveryCandidates.length) this.discoveryCacheState = 'stale';
+          console.warn('loadDiscovery', e);
+        } finally {
+          this.discoveryLoading = false;
+          this._discoveryFetchPromise = null;
+        }
+      })();
+      return this._discoveryFetchPromise;
+    },
+
+    applyDiscoveryFilters(resetRenderLimit = true) {
+      const q = this.discoverySearch.trim().toLowerCase();
+      const minObs = Number(this.discoveryMinObservations || 0);
+      let rows = this.discoveryCandidates.filter(c => {
+        if (this.discoverySource !== 'all' && c.scanner !== this.discoverySource) return false;
+        const named = Boolean(c.friendly_name);
+        if (this.discoveryNamed === 'named' && !named) return false;
+        if (this.discoveryNamed === 'unnamed' && named) return false;
+        if (Number(c.total_observations || 0) < minObs) return false;
+        return !q || [this.entityDisplayName(c), c.entity_id, c.vendor, c.kind, c.scanner]
+          .some(value => String(value || '').toLowerCase().includes(q));
+      });
+      const sorters = {
+        rank: (a, b) => Number(b.candidacy_score || 0) - Number(a.candidacy_score || 0),
+        recent: (a, b) => Number(b.last_seen_unix || 0) - Number(a.last_seen_unix || 0),
+        observations: (a, b) => Number(b.total_observations || 0) - Number(a.total_observations || 0),
+        anomaly: (a, b) => Number(b.anomaly_score || 0) - Number(a.anomaly_score || 0),
+        name: (a, b) => this.entityDisplayName(a).localeCompare(this.entityDisplayName(b)),
+      };
+      rows = [...rows].sort(sorters[this.discoverySort] || sorters.rank);
+      this.discoveryFiltered = rows;
+      if (resetRenderLimit) {
+        this.discoveryRenderLimit = 100;
+      } else {
+        this.discoveryRenderLimit = Math.max(100, Math.min(this.discoveryRenderLimit, rows.length));
+      }
+    },
+
+    visibleDiscoveryCandidates() {
+      return this.discoveryFiltered.slice(0, this.discoveryRenderLimit);
+    },
+
+    showMoreDiscovery(all = false) {
+      this.discoveryRenderLimit = all
+        ? this.discoveryFiltered.length
+        : Math.min(this.discoveryFiltered.length, this.discoveryRenderLimit + 100);
+    },
+
+    discoveryCacheLabel() {
+      if (!this.discoveryFetchedAt) return 'not cached';
+      const age = this.relTime(Math.floor(this.discoveryFetchedAt / 1000));
+      return `${this.discoveryCacheState} · updated ${age}`;
     },
 
     async loadRecap() {
@@ -372,6 +526,13 @@ function watchtower() {
         this.recap = await r.json();
         this.tabsLoaded = { ...this.tabsLoaded, overview: true };
       } catch (e) { console.warn('loadRecap', e); }
+    },
+
+    async loadPresence() {
+      try {
+        const r = await this._fetch('/api/presence?minutes=30', 6000);
+        this.presence = await r.json();
+      } catch (e) { console.warn('loadPresence', e.name); }
     },
 
     async loadSettings() {
@@ -397,6 +558,214 @@ function watchtower() {
       } catch (e) { alert('save failed: ' + e.message); }
     },
 
+    saveWifiToken() {
+      try {
+        if (this.wifiToken) sessionStorage.setItem('watchtower.wifiToken', this.wifiToken.trim());
+        else sessionStorage.removeItem('watchtower.wifiToken');
+      } catch (e) {}
+    },
+
+    adminHeaders(json = false) {
+      const headers = {};
+      if (json) headers['Content-Type'] = 'application/json';
+      if (this.wifiToken.trim()) headers['X-Watchtower-Admin-Token'] = this.wifiToken.trim();
+      return headers;
+    },
+
+    async loadIdentity(includeDevices = true) {
+      if (!this.wifiToken.trim()) {
+        this.identityMessage = 'Enter the setup token above to unlock local identity controls.';
+        return;
+      }
+      this.identityBusy = true;
+      try {
+        const requests = [fetch('/api/name-keys', {headers: this.adminHeaders()})];
+        if (includeDevices) requests.push(fetch('/api/bluetooth/devices', {headers: this.adminHeaders()}));
+        const responses = await Promise.all(requests);
+        const keys = await responses[0].json();
+        if (!responses[0].ok) throw new Error(keys.error || 'Could not open key vault');
+        this.nameKeys = keys.keys || [];
+        if (responses[1]) {
+          const bt = await responses[1].json();
+          if (!responses[1].ok) throw new Error(bt.error || 'Bluetooth is unavailable');
+          this.bluetoothDevices = bt.devices || [];
+        }
+        this.identityMessage = `Loaded ${this.nameKeys.length} authorized key(s) and ${this.bluetoothDevices.length} Bluetooth device(s).`;
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async addIdentityKey() {
+      this.identityBusy = true;
+      try {
+        const r = await fetch('/api/name-keys', {
+          method: 'POST', headers: this.adminHeaders(true), body: JSON.stringify(this.identityKey),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Key import failed');
+        this.identityKey.secret = '';
+        this.identityKey.label = '';
+        await this.loadIdentity(false);
+        this.identityMessage = 'Key encrypted locally and ready for authorized name resolution.';
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async deleteIdentityKey(key) {
+      if (!confirm(`Delete local key “${key.label}”? Names already recorded remain auditable.`)) return;
+      this.identityBusy = true;
+      try {
+        const r = await fetch('/api/name-keys/' + encodeURIComponent(key.key_id), {
+          method: 'DELETE', headers: this.adminHeaders(),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Delete failed');
+        await this.loadIdentity(false);
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async scanBluetooth() {
+      this.identityBusy = true;
+      this.identityMessage = 'Running bounded Bluetooth Classic inquiry and remote-name resolution…';
+      try {
+        const r = await fetch('/api/bluetooth/scan', {method: 'POST', headers: this.adminHeaders(true), body: '{}'});
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Bluetooth scan failed');
+        this.bluetoothDevices = j.devices || [];
+        this.identityMessage = `Bluetooth scan complete: ${this.bluetoothDevices.length} cached or nearby device(s).`;
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async pairBluetooth(device) {
+      if (!confirm(`Pair with ${device.alias || device.name || device.address}? Put your device in pairing mode first.`)) return;
+      await this.identityDeviceAction('/api/bluetooth/pair', device, 'Pairing');
+    },
+
+    async decryptFastPairName(device) {
+      await this.identityDeviceAction('/api/bluetooth/fast-pair-name', device, 'Fast Pair name request');
+    },
+
+    async identityDeviceAction(path, device, label) {
+      this.identityBusy = true;
+      this.identityMessage = label + ' in progress…';
+      try {
+        const r = await fetch(path, {method: 'POST', headers: this.adminHeaders(true),
+          body: JSON.stringify({address: device.address})});
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || `${label} failed`);
+        this.identityMessage = j.name ? `Authenticated personalized name: ${j.name}` :
+          `Paired successfully${j.ead_key_imported ? '; EAD key material encrypted in the local vault' : ''}.`;
+        await this.loadIdentity(true);
+      } catch (e) { this.identityMessage = e.message; }
+      finally { this.identityBusy = false; }
+    },
+
+    async loadWifi(rescan) {
+      if (this.wifiLoading) return;
+      this.wifiLoading = true;
+      try {
+        const r = await this._fetch('/api/wifi?rescan=' + (rescan ? '1' : '0'), rescan ? 25000 : 8000);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Wi-Fi status unavailable');
+        this.wifi = j;
+        if (!this.wifiConnectSsid && j.current?.ssid) {
+          this.wifiConnectSsid = j.current.ssid;
+          this.wifiConnectSecurity = j.current.security || 'wpa2';
+        }
+        this.wifiMessage = rescan ? `Found ${(j.networks || []).length} networks.` : this.wifiMessage;
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiLoading = false;
+      }
+    },
+
+    chooseWifi(network) {
+      this.wifiConnectSsid = network.ssid;
+      this.wifiConnectSecurity = network.security || 'wpa2';
+      this.wifiPassword = '';
+      this.wifiMessage = '';
+    },
+
+    async wifiMutation(path, body, allowRecoverySetup = false) {
+      this.saveWifiToken();
+      const recoverySetup = allowRecoverySetup && this.wifi.fallback_access_point?.active;
+      if (!this.wifiToken.trim() && !recoverySetup) throw new Error('Enter the Wi-Fi setup token first.');
+      const headers = { 'Content-Type': 'application/json' };
+      if (this.wifiToken.trim()) headers['X-Watchtower-Admin-Token'] = this.wifiToken.trim();
+      const r = await fetch(path, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+      return j;
+    },
+
+    async pollWifiResult(requestId) {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          const r = await this._fetch('/api/wifi/results/' + encodeURIComponent(requestId), 4000);
+          const j = await r.json();
+          if (r.status === 202 || j.pending) continue;
+          if (!j.ok) throw new Error(j.error || 'NetworkManager could not apply the change.');
+          return j;
+        } catch (e) {
+          if (attempt >= 39) throw e;
+          // A Wi-Fi transition can briefly interrupt this browser connection.
+        }
+      }
+      throw new Error('Timed out waiting for NetworkManager. Reload Watchtower after the Pi reconnects.');
+    },
+
+    async connectWifi() {
+      if (this.wifiBusy) return;
+      this.wifiBusy = true;
+      this.wifiMessage = `Connecting to ${this.wifiConnectSsid}…`;
+      try {
+        const recoverySetup = !!this.wifi.fallback_access_point?.active;
+        const queued = await this.wifiMutation('/api/wifi/connect', {
+          ssid: this.wifiConnectSsid,
+          security: this.wifiConnectSecurity,
+          password: this.wifiPassword,
+        }, true);
+        if (recoverySetup) {
+          this.wifiPassword = '';
+          this.wifiMessage = 'Credentials submitted. The Watchtower hotspot will disappear if the connection succeeds. Join the selected network, then reopen Watchtower on its LAN address.';
+          return;
+        }
+        const result = await this.pollWifiResult(queued.request_id);
+        this.wifiPassword = '';
+        this.wifiMessage = `Connected to ${result.ssid}.`;
+        await this.loadWifi(true);
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiBusy = false;
+      }
+    },
+
+    async forgetWifi(profile) {
+      if (profile.active || this.wifiBusy) return;
+      if (!confirm(`Forget saved Wi-Fi network “${profile.ssid || profile.name}”?`)) return;
+      this.wifiBusy = true;
+      this.wifiMessage = `Forgetting ${profile.ssid || profile.name}…`;
+      try {
+        const queued = await this.wifiMutation('/api/wifi/forget', { uuid: profile.uuid });
+        await this.pollWifiResult(queued.request_id);
+        this.wifiMessage = 'Saved network removed.';
+        await this.loadWifi(true);
+      } catch (e) {
+        this.wifiMessage = e.message;
+      } finally {
+        this.wifiBusy = false;
+      }
+    },
+
     settingsLabel(key) {
       return ({
         'linger_threshold_sec': 'Linger threshold',
@@ -406,6 +775,9 @@ function watchtower() {
         'after_hours_end_utc': 'After-hours end (UTC)',
         'anomaly_severity_high_threshold': 'High-severity score',
         'anomaly_severity_medium_threshold': 'Medium-severity score',
+        'intrusion_episode_window_sec': 'Intrusion correlation window',
+        'intrusion_away_threshold': 'Intrusion score while away',
+        'intrusion_home_threshold': 'Intrusion score while home',
       })[key] || key;
     },
     settingsHint(key) {
@@ -413,6 +785,9 @@ function watchtower() {
         'linger_threshold_sec': 'seconds',
         'anchor_timeout_sec': 'seconds',
         'close_perimeter_rssi_dbm': 'dBm (higher = closer)',
+        'intrusion_episode_window_sec': 'seconds (60-900)',
+        'intrusion_away_threshold': 'score 0-100',
+        'intrusion_home_threshold': 'score 0-100',
         'after_hours_start_utc': 'hour 0–23',
         'after_hours_end_utc': 'hour 0–23',
         'anomaly_severity_high_threshold': '0.0–1.0',
@@ -420,7 +795,7 @@ function watchtower() {
       })[key] || '';
     },
     settingsStep(key) {
-      if (key.includes('threshold') && !key.includes('sec')) return '0.05';
+      if (key.startsWith('anomaly_severity_')) return '0.05';
       return '1';
     },
     ruleLabel(key) {
@@ -428,12 +803,14 @@ function watchtower() {
         'rule_anchor_absent_unknown_linger': 'Anchor absent + unknown lingering',
         'rule_unknown_keyfob_emission':      'Unknown key-fob emission (sub-GHz)',
         'rule_unknown_garage_emission':      'Unknown garage-door emission (sub-GHz)',
-        'rule_airtag_findmy_present':        'Apple Find-My / AirTag broadcast',
-        'rule_findmy_persistent_tracker':    'Persistent AirTag — anti-stalking',
+        'rule_airtag_findmy_present':        'Nearby location tracker',
+        'rule_findmy_persistent_tracker':    'Persistent tracker — anti-stalking',
         'rule_first_time_visitor_after_hours': 'First-time visitor after hours',
         'rule_close_unknown_signal':         'Strong-signal unknown nearby',
         'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
         'rule_honeypot_engaged':             'Honeypot lure engaged',
+        'rule_flipper_zero_detected':        'Flipper Zero detected',
+        'rule_multi_signal_intrusion':       'Multi-signal intrusion episode',
       })[key] || key;
     },
     ruleDescription(key) {
@@ -441,12 +818,14 @@ function watchtower() {
         'rule_anchor_absent_unknown_linger': 'Fires when an unknown entity is present > linger threshold while no anchor is home.',
         'rule_unknown_keyfob_emission':      'Fires on unrecognized 315/433 MHz key-fob protocol activity.',
         'rule_unknown_garage_emission':      'Fires on unrecognized 315/390 MHz garage-door protocol activity.',
-        'rule_airtag_findmy_present':        'Fires on Apple Find-My broadcasts near the Pi at strong signal.',
-        'rule_findmy_persistent_tracker':    'Fires when Find-My beacons have been near for 3+ hr/day across 3+ consecutive days — suggests a stationary or following AirTag.',
+        'rule_airtag_findmy_present':        'Fires on strong protocol-confirmed Apple, Tile, or cross-platform location-tracker broadcasts.',
+        'rule_findmy_persistent_tracker':    'Fires only when one tracker cluster has been near for 3+ hr/day across 3+ consecutive days.',
         'rule_first_time_visitor_after_hours': 'New entity first-seen after-hours window. Requires at least one anchor enrolled.',
         'rule_close_unknown_signal':         'Mobile BLE device with very strong RSSI and recurring presence.',
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
         'rule_honeypot_engaged':             'Fires when a device connects to one of our honeypot lures (Tesla key, smart lock, etc.).',
+        'rule_flipper_zero_detected':        'High-confidence match on the official Flipper BLE name and serial-service UUID. Does not attribute unrelated sub-GHz traffic.',
+        'rule_multi_signal_intrusion':       'Requires independent radio families plus a decisive interaction signal; shows every contributing signal.',
       })[key] || '';
     },
     findmyKey: null,
@@ -494,7 +873,7 @@ function watchtower() {
         const j = await r.json();
         this.discoveryProbed = { ...this.discoveryProbed, [c.entity_id]: j.result };
         if (j.result?.ok) {
-          await this.loadDiscovery();
+          await this.loadDiscovery(true);
           await this.loadEntities();
         }
       } catch (e) {
@@ -511,7 +890,7 @@ function watchtower() {
           body: JSON.stringify({ classification }),
         });
         c.classification = classification;
-        await this.loadDiscovery();
+        await this.loadDiscovery(true);
         await this.loadEntities();
         await this.loadState();
       } catch (e) { console.warn('quickClassify', e); }
@@ -524,6 +903,30 @@ function watchtower() {
         this.entityDetail = await r.json();
         if (!sameEntity) this.probeResult = null;
       } catch (e) { console.warn('openEntity', e); }
+    },
+
+    isAppleProximity(entity) {
+      const eid = entity?.entity_id || '';
+      return eid.startsWith('ble:apple:proximity-pairing') ||
+        eid.startsWith('ble:apple:airpods-connected') ||
+        entity?.kind === 'ble_headphones' && eid.startsWith('ble:apple:');
+    },
+
+    nameEvidenceLabel(candidate) {
+      const evidence = candidate?.evidence || {};
+      const bits = [];
+      if (evidence.model_id) bits.push(`model code ${evidence.model_id}`);
+      if (evidence.model_identifier) bits.push(evidence.model_identifier);
+      if (evidence.subtype) bits.push(evidence.subtype.replace(/-/g, ' '));
+      if (evidence.model_resolved === false) bits.push('unresolved');
+      return [...new Set(bits)].join(' · ');
+    },
+
+    openAppleIdentify() {
+      this.entityDetail = null;
+      this.tab = 'settings';
+      this.identityMessage = 'Put the AirPods in pairing mode until the light flashes white, then run scan / identify AirPods.';
+      this.$nextTick(() => document.getElementById('identity-controls')?.scrollIntoView({behavior: 'smooth'}));
     },
 
     probing: false,
@@ -570,11 +973,18 @@ function watchtower() {
     async renameEntity(name) {
       if (!this.entityDetail) return;
       const eid = this.entityDetail.entity.entity_id;
-      await fetch(`/api/entities/${encodeURIComponent(eid)}/name`, {
+      const requested = (name || '').trim();
+      const current = this.entityDetail.entity.friendly_name || '';
+      if (requested === current) return;
+      const r = await fetch(`/api/entities/${encodeURIComponent(eid)}/name`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ friendly_name: name }),
+        body: JSON.stringify({ friendly_name: requested }),
       });
-      this.entityDetail.entity.friendly_name = name;
+      const result = await r.json();
+      this.entityDetail.entity.friendly_name = result.friendly_name;
+      this.entityDetail.entity.friendly_name_source = result.friendly_name_source;
+      this.entityDetail.entity.friendly_name_confidence = result.friendly_name_confidence;
+      await this.openEntity(eid);
       this.loadEntities();
     },
 
@@ -860,6 +1270,32 @@ function watchtower() {
       }
       if (e.entity_id?.startsWith('ble:')) return e.entity_id.slice(4);
       return e.entity_id || '—';
+    },
+    nameSourceLabel(source) {
+      return ({
+        user: 'your label',
+        ble_gatt_device_name: 'BLE Device Name',
+        ble_gatt_model: 'BLE model',
+        ble_advertised_name: 'BLE advertisement',
+        apple_ble_local_name: 'Apple BLE name',
+        apple_continuity_model: 'Apple Continuity model',
+        apple_companion_name: 'Apple Companion name',
+        apple_bonjour_bluetooth_link: 'Apple name (Bluetooth link)',
+        apple_device_info_name: 'Apple device-info name',
+        apple_mobile_device_name: 'Apple mobile-device name',
+        apple_sleep_proxy_name: 'Apple sleep-proxy name',
+        apple_bonjour_host_name: 'Apple Bonjour host name',
+        apple_bonjour_model: 'Apple Bonjour model',
+        bonjour_model: 'Bonjour model',
+        airplay_display_name: 'AirPlay display name',
+        homekit_accessory_name: 'HomeKit accessory name',
+        wifi_wps_device_name: 'Wi-Fi WPS name',
+        wifi_wps_model: 'Wi-Fi WPS model',
+        wifi_ssid: 'Wi-Fi SSID',
+        signature: 'verified signature',
+        service_fingerprint: 'protocol fingerprint',
+        legacy: 'existing label',
+      })[source] || source || 'unresolved';
     },
     entityMetaLine(e) {
       const bits = [];

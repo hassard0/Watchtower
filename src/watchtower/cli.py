@@ -16,6 +16,8 @@ from watchtower.honeypot import Honeypot
 from watchtower.bus import Bus
 from watchtower.config import load_config
 from watchtower.logging_setup import setup_logging
+from watchtower.local_discovery import LocalIdentityDiscovery
+from watchtower.scanners.base import Scanner
 from watchtower.scanners.ble import BleScanner
 from watchtower.scanners.midband import MidbandScanner
 from watchtower.scanners.subghz import SubGhzScanner
@@ -117,7 +119,7 @@ async def _run_async(config_path: Path) -> None:
 
     pruner_task = asyncio.create_task(_pruner_loop(stop, cfg.storage.db_path, cfg.storage.retention_days))
     analytics_task = asyncio.create_task(_analytics_loop(stop, cfg.storage.db_path))
-    scanner_tasks = [asyncio.create_task(s.start()) for s in scanners]
+    scanner_tasks = [asyncio.create_task(_scanner_loop(s, stop)) for s in scanners]
     sub_decoder_task = asyncio.create_task(sub_decoder.run()) if sub_decoder else None
 
     # Active GATT prober — toggle-able via settings.active_probing_enabled.
@@ -147,8 +149,15 @@ async def _run_async(config_path: Path) -> None:
     )
     findmy_task = asyncio.create_task(findmy_tracker.run(stop))
 
-    api = ApiServer(cfg.storage.db_path, host="0.0.0.0", port=8080)
+    identity_discovery = LocalIdentityDiscovery(
+        cfg.storage.db_path, settings_getter=lambda: load_settings(cfg.storage.db_path),
+        pause_scanner_factory=pause_factory,
+    )
+    identity_task = asyncio.create_task(identity_discovery.run(stop))
+
+    api = ApiServer(cfg.storage.db_path, host=cfg.api.host, port=cfg.api.port)
     api.set_findmy_tracker(findmy_tracker)
+    api.set_ble_adapter(cfg.scanners.ble.adapter)
     api.set_pause_scanner_factory(pause_factory)
     await api.start()
 
@@ -158,9 +167,14 @@ async def _run_async(config_path: Path) -> None:
         await s.stop()
     for t in scanner_tasks:
         t.cancel()
+    for t in scanner_tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     if sub_decoder is not None:
         await sub_decoder.stop()
-    tasks_to_cancel = [pruner_task, analytics_task, prober_task, honeypot_task, findmy_task]
+    tasks_to_cancel = [pruner_task, analytics_task, prober_task, honeypot_task, findmy_task, identity_task]
     if sub_decoder_task is not None:
         tasks_to_cancel.append(sub_decoder_task)
     for t in tasks_to_cancel:
@@ -173,6 +187,25 @@ async def _run_async(config_path: Path) -> None:
     await sink.stop()
     await bus.shutdown()
     log.info("watchtower stopped")
+
+
+async def _scanner_loop(scanner: Scanner, stop: asyncio.Event, retry_sec: float = 10.0) -> None:
+    """Keep an individual scanner alive across transient hardware failures."""
+    while not stop.is_set():
+        try:
+            await scanner.start()
+            if not stop.is_set():
+                log.warning("%s stopped unexpectedly; retrying in %.0fs", scanner.name.value, retry_sec)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("%s crashed; retrying in %.0fs", scanner.name.value, retry_sec)
+        if stop.is_set():
+            break
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=retry_sec)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _pruner_loop(stop: asyncio.Event, db_path: str, retention_days: int) -> None:

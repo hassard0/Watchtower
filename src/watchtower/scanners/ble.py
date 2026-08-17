@@ -11,19 +11,58 @@ from typing import Any
 
 from bleak import BleakScanner
 
-from watchtower.events import Event, EventKind, Features, Scanner as ScannerName
+from watchtower.events import Event, EventKind, Features
+from watchtower.events import Scanner as ScannerName
+from watchtower.flipper import detect_flipper_zero
+from watchtower.location_trackers import detect_location_tracker
 from watchtower.scanners.base import Scanner
 
 log = logging.getLogger(__name__)
 
 
-def _is_random_mac(mac: str) -> bool:
-    """The locally-administered bit (bit 1 of MSB) flags random/non-OUI MACs."""
+def _bluez_address_type(platform_data: Any, device_details: Any = None) -> str | None:
+    """Return BlueZ's authoritative Device1.AddressType when available."""
+    candidates: list[Any] = []
+    try:
+        candidates.append(platform_data[1])
+    except (IndexError, TypeError):
+        pass
+    if isinstance(device_details, dict):
+        candidates.extend((device_details.get("props"), device_details))
+    for props in candidates:
+        if not isinstance(props, dict):
+            continue
+        value = props.get("AddressType")
+        value = getattr(value, "value", value)
+        if value is None:
+            continue
+        normalized = str(value).strip().lower().replace("_", "-")
+        if normalized in {"public", "public-id"}:
+            return "public"
+        if normalized in {"random", "random-id"}:
+            return "random"
+    return None
+
+
+def _is_random_mac(mac: str, address_type: str | None = None) -> bool | None:
+    """Classify BLE privacy addresses without mistaking public OUIs for them.
+
+    BlueZ knows whether an address came from the public or random BLE address
+    space.  When a backend does not expose that information, a set IEEE
+    locally-administered bit is useful evidence of randomization; an unset bit
+    is *not* evidence that a BLE address is public, so the result remains
+    unknown instead of incorrectly creating a stable entity.
+    """
+    normalized = str(address_type or "").strip().lower()
+    if normalized == "random":
+        return True
+    if normalized == "public":
+        return False
     try:
         first = int(mac.split(":")[0], 16)
     except (IndexError, ValueError):
-        return False
-    return bool(first & 0x02)
+        return None
+    return True if first & 0x02 else None
 
 
 # Minimal seed table covering well-known historical OUIs. The full IEEE OUI
@@ -66,6 +105,30 @@ def _mfr_data_to_hex(data: dict[int, bytes]) -> str | None:
     for vid, payload in data.items():
         parts.append(vid.to_bytes(2, "little").hex() + payload.hex())
     return "".join(parts)
+
+
+def _encrypted_ad_data(platform_data: Any) -> list[str]:
+    """Extract raw AD type 0x31 exposed by Bleak's BlueZ backend.
+
+    Bleak intentionally normalizes only common AD types. BlueZ retains the
+    remaining types in Device1.AdvertisingData, available through
+    AdvertisementData.platform_data as ``(object_path, properties)``.
+    """
+    try:
+        props = platform_data[1]
+        advertising = props.get("AdvertisingData", {})
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return []
+    out: list[str] = []
+    for key, value in getattr(advertising, "items", lambda: [])():
+        try:
+            ad_type = int(getattr(key, "value", key))
+            raw = getattr(value, "value", value)
+            if ad_type == 0x31:
+                out.append(bytes(raw).hex())
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 class BleScanner(Scanner):
@@ -130,7 +193,13 @@ class BleScanner(Scanner):
                 mac = device.address
                 rssi = int(adv.rssi) if adv.rssi is not None else None
                 services = list(adv.service_uuids or [])
+                service_data = {str(k): v.hex() for k, v in (adv.service_data or {}).items()}
                 mfr_hex = _mfr_data_to_hex(adv.manufacturer_data or {})
+                platform_data = getattr(adv, "platform_data", ())
+                ead_hex = _encrypted_ad_data(platform_data)
+                address_type = _bluez_address_type(
+                    platform_data, getattr(device, "details", None),
+                )
                 local_name = adv.local_name or device.name
                 # Dedupe key: same MAC + same advertisement content.
                 # RSSI is excluded so RSSI fluctuations don't bypass dedup;
@@ -139,7 +208,8 @@ class BleScanner(Scanner):
                 # keys in Apple Continuity, counters in some Samsung msgs) bypass
                 # dedup if included. Use vendor-id + sub-type only (first 6 hex chars).
                 mfr_stable = mfr_hex[:6] if mfr_hex else ""
-                content = (mac, hash((tuple(services), mfr_stable, local_name)))
+                service_stable = tuple(sorted((k, v[:4]) for k, v in service_data.items()))
+                content = (mac, hash((tuple(services), service_stable, mfr_stable, local_name)))
                 now_ts = _time.monotonic()
                 last = self._last_emit.get(content)
                 if last is not None and (now_ts - last) < self.DEDUP_WINDOW_SEC:
@@ -152,15 +222,31 @@ class BleScanner(Scanner):
                         self._last_emit.pop(k, None)
                     self._last_gc = now_ts
 
+                signature = detect_flipper_zero(local_name, services)
+                tracker = detect_location_tracker(local_name, services, service_data, mfr_hex)
+                decoded = {}
+                if mfr_hex and mfr_hex.lower().startswith("4c00"):
+                    from watchtower.apple_continuity import decode_continuity
+                    continuity = decode_continuity(mfr_hex)
+                    if continuity:
+                        decoded["apple_continuity"] = continuity
+                if signature:
+                    decoded["device_detection"] = signature
+                if tracker:
+                    decoded["location_tracker"] = tracker
                 feats = Features(
                     mac=mac,
                     rssi=rssi,
                     tx_power=int(adv.tx_power) if adv.tx_power is not None else None,
                     vendor_oui=_vendor_for_oui(mac),
-                    is_random_mac=_is_random_mac(mac),
+                    address_type=address_type,
+                    is_random_mac=_is_random_mac(mac, address_type),
                     service_uuids=services,
+                    service_data_hex=service_data,
                     manufacturer_data_hex=mfr_hex,
+                    encrypted_ad_data_hex=ead_hex,
                     local_name=local_name,
+                    decoded=decoded,
                 )
                 ev = Event(
                     scanner=ScannerName.BLE,
@@ -168,13 +254,16 @@ class BleScanner(Scanner):
                     features=feats,
                     raw={
                         "address": device.address,
+                        "address_type": address_type,
                         "name": device.name,
                         "rssi": adv.rssi,
                         "tx_power": adv.tx_power,
                         "service_uuids": list(adv.service_uuids or []),
+                        "service_data": service_data,
                         "manufacturer_data": {
                             str(k): v.hex() for k, v in (adv.manufacturer_data or {}).items()
                         },
+                        "encrypted_ad_data": ead_hex,
                     },
                 )
                 # Schedule async emit from sync callback context.

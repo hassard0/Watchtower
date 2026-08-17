@@ -164,6 +164,11 @@ tailwind.config = {
           <path d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>
         </svg>
       </button>
+      <button @click="switchTab('settings'); $nextTick(() => loadWifi(true))" title="Settings and Wi-Fi"
+              class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition"
+              :class="tab === 'settings' && 'border-signal-glow/50 text-signal-glow'">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
       <button @click="refresh()" class="p-1.5 rounded-md bg-ink-700/60 border border-ink-600/60 hover:border-signal-glow/40 transition" :class="loading && 'animate-spin'">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
       </button>
@@ -278,6 +283,77 @@ tailwind.config = {
             <div class="h-full rounded-full bg-gradient-to-r from-signal-deep via-signal-glow to-signal-pulse transition-all" :style="`width: ${baselineProgressPct}%`"></div>
           </div>
         </div>
+      </div>
+
+      <!-- TRANSIENT PRESENCE + MULTI-SIGNAL EPISODES -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex flex-col md:flex-row md:items-start justify-between gap-3 mb-4">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500">Presence intelligence</div>
+            <div class="text-base font-semibold">Anonymous flows and intrusion episodes</div>
+            <div class="text-[11px] text-slate-500 mt-1">Short-lived behavioral correlation across rotating BLE, Wi-Fi, sub-GHz and honeypot signals.</div>
+          </div>
+          <div class="flex gap-2">
+            <div class="bg-ink-700/40 rounded-lg px-3 py-2 text-center">
+              <div class="text-xl num font-bold text-signal-glow" x-text="presence?.active_tracklets ?? 0"></div>
+              <div class="text-[9px] uppercase tracking-wider text-slate-500">active flows</div>
+            </div>
+            <div class="bg-ink-700/40 rounded-lg px-3 py-2 text-center">
+              <div class="text-xl num font-bold text-signal-pulse" x-text="presence?.rotating_tracklets ?? 0"></div>
+              <div class="text-[9px] uppercase tracking-wider text-slate-500">multi-address flows</div>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+          <div class="md:col-span-5 rounded-xl border p-4"
+               :class="presence?.current_episode?.status === 'alerted' ? 'border-threat/50 bg-threat/10' : 'border-ink-600/50 bg-ink-700/25'">
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-[10px] uppercase tracking-widest text-slate-500">Current episode</div>
+                <div class="text-lg font-semibold capitalize" x-text="presence?.current_episode?.status || 'quiet'"></div>
+              </div>
+              <div class="text-3xl num font-bold"
+                   :class="(presence?.current_episode?.score || 0) >= 75 ? 'text-threat' : (presence?.current_episode?.score || 0) >= 40 ? 'text-signal-warm' : 'text-slate-500'"
+                   x-text="presence?.current_episode?.score || 0"></div>
+            </div>
+            <div x-show="presence?.current_episode" class="mt-3">
+              <div class="flex flex-wrap gap-1.5">
+                <template x-for="s in (presence?.current_episode?.evidence?.signals || [])" :key="s.type">
+                  <span class="text-[9px] uppercase tracking-wider px-2 py-1 rounded bg-ink-700/60 border border-ink-600/50"
+                        x-text="s.type.replace(/_/g,' ') + ' +' + Math.round(s.weight)"></span>
+                </template>
+              </div>
+              <div class="text-[10px] mt-2"
+                   :class="(presence?.current_episode?.evidence?.decisive_signal_types || []).length ? 'text-threat' : 'text-slate-500'"
+                   x-text="(presence?.current_episode?.evidence?.decisive_signal_types || []).length ? 'Decisive trigger: ' + presence.current_episode.evidence.decisive_signal_types.join(', ').replace(/_/g,' ') : 'No decisive trigger — observation only'"></div>
+              <div class="text-[10px] text-slate-500 mt-3" x-text="'State: ' + (presence?.current_episode?.home_state || 'unknown') + ' · last signal ' + relTime(presence?.current_episode?.last_seen_unix)"></div>
+            </div>
+            <div x-show="!presence?.current_episode" class="text-xs text-slate-500 mt-3">No correlated episode in the last five minutes.</div>
+          </div>
+          <div class="md:col-span-7">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Recent anonymous flows</div>
+            <div class="space-y-1 max-h-48 overflow-y-auto scrollbar">
+              <template x-for="t in (presence?.tracklets || []).slice(0, 10)" :key="t.tracklet_id">
+                <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-700/30">
+                  <span class="w-2 h-2 rounded-full flex-shrink-0" :class="t.currently_present ? 'bg-signal-pulse scan-pulse' : 'bg-slate-600'"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs font-medium truncate" x-text="t.label"></div>
+                    <div class="text-[10px] text-slate-500">
+                      <span x-text="t.observation_count + ' observations'"></span>
+                      <span x-show="t.address_count > 1" class="text-signal-glow" x-text="' · ' + t.address_count + ' address handoffs'"></span>
+                    </div>
+                  </div>
+                  <div class="text-right flex-shrink-0">
+                    <div class="text-xs num" x-text="t.max_rssi != null ? t.max_rssi + ' dBm' : '—'"></div>
+                    <div class="text-[9px] text-slate-500 num" x-text="relTime(t.last_seen_unix)"></div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="(presence?.tracklets || []).length === 0" class="text-xs text-slate-500 text-center py-8">No correlatable anonymous flows yet.</div>
+            </div>
+          </div>
+        </div>
+        <div class="text-[10px] text-slate-600 mt-3" x-text="presence?.limitations"></div>
       </div>
 
       <!-- RF RADAR + ANOMALY TOP LIST -->
@@ -475,12 +551,47 @@ tailwind.config = {
           </div>
           <div class="flex-1">
             <div class="text-base font-semibold">Discover &amp; enroll</div>
-            <div class="text-[11px] text-slate-500">Devices we keep seeing — mark them so the system knows what's normal</div>
+            <div class="text-[11px] text-slate-500">All eligible enrollment candidates, ranked by identity confidence</div>
           </div>
-          <button @click="loadDiscovery()" class="text-[10px] text-signal-glow hover:text-signal-pulse">refresh</button>
+          <div class="text-right">
+            <button @click="loadDiscovery(true)" :disabled="discoveryLoading"
+                    class="text-[10px] text-signal-glow hover:text-signal-pulse disabled:opacity-40"
+                    x-text="discoveryLoading ? 'refreshing…' : 'refresh now'"></button>
+            <div class="text-[9px] text-slate-600" x-text="discoveryCacheLabel()"></div>
+          </div>
         </div>
         <div class="text-xs text-slate-400 leading-relaxed">
           <span class="text-anchor font-medium">Anchor</span> = your phone, defines &quot;home&quot;. <span class="text-satellite font-medium">Satellite</span> = your watch / earbuds / kids' phone. <span class="text-guest font-medium">Known guest</span> = recurring visitor. <span class="text-threat font-medium">Untrusted</span> = a device you don't want here.
+        </div>
+        <div class="text-[10px] text-slate-500 mt-2">
+          Cached <span class="num text-slate-300" x-text="discoveryCandidates.length"></span> candidates;
+          <span class="num text-slate-300" x-text="discoveryFiltered.length"></span> match the filters and
+          <span class="num text-slate-300" x-text="visibleDiscoveryCandidates().length"></span> are currently rendered.
+          Eligibility requires activity within seven days plus 50 observations, strong name evidence, or an Apple grouped signal.
+          Classified and lower-evidence records remain under Entities.
+        </div>
+        <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+          <input x-model.debounce.150ms="discoverySearch" placeholder="name, ID, vendor, type"
+                 class="lg:col-span-2 bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-3 py-2 focus:outline-none focus:border-signal-glow/40">
+          <select x-model="discoverySource" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option value="all">all radios</option><option value="ble_scanner">BLE</option>
+            <option value="wifi_scanner">Wi-Fi</option><option value="lan_discovery">LAN</option>
+            <option value="subghz_scanner">Sub-GHz</option><option value="midband_scanner">Mid-band</option>
+          </select>
+          <select x-model="discoveryNamed" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option value="all">named + unnamed</option><option value="named">named only</option><option value="unnamed">unnamed only</option>
+          </select>
+          <select x-model.number="discoveryMinObservations" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option :value="0">any observations</option><option :value="100">100+ observations</option>
+            <option :value="1000">1,000+ observations</option><option :value="10000">10,000+ observations</option>
+          </select>
+        </div>
+        <div class="mt-2 flex items-center justify-end gap-2">
+          <span class="text-[9px] uppercase tracking-wider text-slate-600">sort</span>
+          <select x-model="discoverySort" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-[10px] px-2 py-1">
+            <option value="rank">best identity</option><option value="recent">most recent</option>
+            <option value="observations">most observed</option><option value="anomaly">most anomalous</option><option value="name">name</option>
+          </select>
         </div>
       </div>
 
@@ -500,7 +611,7 @@ tailwind.config = {
       </div>
 
       <div class="space-y-1.5">
-        <template x-for="c in discoveryCandidates" :key="c.entity_id">
+        <template x-for="c in visibleDiscoveryCandidates()" :key="c.entity_id">
           <div class="glass rounded-xl p-3 flex items-center gap-3">
             <div class="relative w-10 h-10 flex-shrink-0">
               <div class="absolute inset-0 rounded-full anomaly-ring"
@@ -545,7 +656,12 @@ tailwind.config = {
             <button @click="openEntity(c.entity_id)" class="text-slate-500 hover:text-slate-200 px-1">→</button>
           </div>
         </template>
-        <div x-show="discoveryCandidates.length === 0" class="text-xs text-slate-500 text-center py-12 glass rounded-xl">no candidates yet — let the system observe for a few hours, then check back</div>
+        <div x-show="visibleDiscoveryCandidates().length === 0" class="text-xs text-slate-500 text-center py-12 glass rounded-xl">no matching candidates — clear the filter or let the system observe longer</div>
+      </div>
+      <div x-show="visibleDiscoveryCandidates().length < discoveryFiltered.length" class="glass rounded-xl p-3 flex items-center justify-center gap-3">
+        <span class="text-[10px] text-slate-500 num" x-text="visibleDiscoveryCandidates().length + ' of ' + discoveryFiltered.length + ' rendered'"></span>
+        <button @click="showMoreDiscovery(false)" class="text-xs px-3 py-1.5 rounded border border-signal-glow/40 text-signal-glow">show 100 more</button>
+        <button @click="showMoreDiscovery(true)" class="text-xs px-3 py-1.5 rounded border border-ink-600/40 text-slate-300">show all</button>
       </div>
     </section>
 
@@ -684,8 +800,8 @@ tailwind.config = {
             <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg>
           </div>
           <div class="flex-1">
-            <div class="text-base font-semibold">Find-My listener</div>
-            <div class="text-[11px] text-slate-500">Apple Find-My broadcasts in range right now (AirTags, Find-My-enabled accessories, lost AirPods).</div>
+            <div class="text-base font-semibold">Unwanted-tracker listener</div>
+            <div class="text-[11px] text-slate-500">Protocol-confirmed Apple Find My, Tile, and cross-platform DULT broadcasts in range.</div>
           </div>
           <div class="flex items-center gap-1">
             <template x-for="w in [{s:60,l:'1m'},{s:300,l:'5m'},{s:900,l:'15m'}]" :key="w.s">
@@ -705,8 +821,8 @@ tailwind.config = {
             <div class="text-2xl num font-bold text-signal-glow" x-text="findmyData.distinct_count ?? 0"></div>
           </div>
           <div class="bg-ink-700/40 rounded-lg p-3">
-            <div class="text-[10px] uppercase tracking-wider text-slate-500">Owned (with owner nearby)</div>
-            <div class="text-2xl num font-bold text-signal-pulse" x-text="findmyData.by_status?.owned ?? 0"></div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Near owner</div>
+            <div class="text-2xl num font-bold text-signal-pulse" x-text="(findmyData.by_status?.owned ?? 0) + (findmyData.by_status?.['near-owner'] ?? 0)"></div>
           </div>
           <div class="bg-ink-700/40 rounded-lg p-3">
             <div class="text-[10px] uppercase tracking-wider text-slate-500">Separated/lost-mode</div>
@@ -718,7 +834,7 @@ tailwind.config = {
           </div>
         </div>
         <div class="mt-2 text-[10px] text-slate-500">
-          <span class="font-semibold text-slate-400">Note:</span> Apple rotates Find-My keys ~every 15 min so a tracker can show up under multiple addresses across windows. Within a single short window each row ≈ a distinct tracker.
+          <span class="font-semibold text-slate-400">Privacy boundary:</span> Watchtower decodes public tracker state and persistence, not protected owner identity. Use the iOS/Android unwanted-tracker alert alongside this fixed sensor.
         </div>
       </div>
 
@@ -794,7 +910,7 @@ tailwind.config = {
         <div class="flex items-baseline justify-between mb-2">
           <div>
             <div class="text-[10px] uppercase tracking-widest text-slate-500">Stable trackers (clustered across MAC rotations)</div>
-            <div class="text-sm">Inferred owner via co-presence with anchors · last hour</div>
+            <div class="text-sm">Rotation-aware grouping and anchor correlation · last hour</div>
           </div>
           <div class="text-[10px] text-slate-500"><span x-text="findmyClusters.length"></span> clusters</div>
         </div>
@@ -839,9 +955,7 @@ tailwind.config = {
           </template>
         </div>
         <div class="mt-2 text-[10px] text-slate-500">
-          Green ring = inferred owner found via co-presence with an anchor.
-          Red = no anchor matches (potentially stalker tracker if persistent).
-          Numbers show co-presence Jaccard similarity score.
+          Green means this tracker often appears at this sensor when an enrolled anchor does; it does not prove ownership or travel. Red means no correlation. Persistence and separated state carry more alert weight.
         </div>
       </div>
 
@@ -855,7 +969,7 @@ tailwind.config = {
           <thead class="text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-600/40">
             <tr>
               <th class="text-left px-4 py-2 font-medium">Rotating MAC</th>
-              <th class="text-left px-2 py-2 font-medium">Status</th>
+              <th class="text-left px-2 py-2 font-medium">Network / status</th>
               <th class="text-right px-2 py-2 font-medium">RSSI</th>
               <th class="text-right px-2 py-2 font-medium">Sightings</th>
               <th class="text-right px-4 py-2 font-medium">First seen</th>
@@ -872,6 +986,7 @@ tailwind.config = {
                   </div>
                 </td>
                 <td class="px-2 py-2.5">
+                  <span class="text-[10px] uppercase tracking-wider text-slate-400 mr-1" x-text="o.provider || o.family"></span>
                   <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded"
                         :class="findmyStatusClass(o.status)"
                         x-text="o.status || '—'"></span>
@@ -889,9 +1004,9 @@ tailwind.config = {
       <div x-show="!tabLoading.findmy && tabsLoaded.findmy && (findmyData.observers || []).length === 0"
            class="glass rounded-2xl p-12 text-center">
         <div class="text-5xl mb-2 opacity-40">🔎</div>
-        <div class="text-sm font-semibold mb-1">No Find-My broadcasts in window</div>
+        <div class="text-sm font-semibold mb-1">No location-tracker broadcasts in window</div>
         <div class="text-[11px] text-slate-500 max-w-md mx-auto">
-          Try a longer window, or wait — AirTags broadcast every ~2 sec when nearby; iPhones+AirPods broadcast Find-My when they've been disconnected from owner recently.
+          Try a longer window or wait. Legacy and DULT-capable trackers advertise periodically; Tile Anti-Theft Mode may intentionally hide from public scans.
         </div>
       </div>
 
@@ -900,7 +1015,7 @@ tailwind.config = {
         <div class="flex items-baseline justify-between mb-2">
           <div>
             <div class="text-[10px] uppercase tracking-widest text-slate-500">Daily presence — last 7 days</div>
-            <div class="text-sm">minutes of Find-My activity per day · spikes = persistent tracker</div>
+            <div class="text-sm">minutes of any confirmed tracker activity per day · per-cluster rules prevent unrelated devices from combining into one alert</div>
           </div>
         </div>
         <div class="space-y-1.5">
@@ -917,7 +1032,7 @@ tailwind.config = {
           </template>
         </div>
         <div class="mt-3 text-[10px] text-slate-500">
-          The <span class="text-signal-warm font-semibold">warm-orange</span> bars are days with ≥ 180 min of Find-My activity. Three consecutive warm days fires the persistent-tracker rule.
+          The chart shows total radio activity for context. The alert itself now requires the same internal tracker cluster for three consecutive days.
         </div>
       </div>
     </section>
@@ -984,13 +1099,22 @@ tailwind.config = {
         <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Filter</div>
         <template x-for="s in scopeBtns" :key="s.id">
           <button class="seg-btn px-3 py-1.5 rounded-md text-xs font-medium border border-ink-600/40 text-slate-400 hover:text-slate-200"
-                  :data-active="entityScope === s.id" @click="entityScope = s.id; loadEntities()">
+                  :data-active="entityScope === s.id" @click="entityScope = s.id; entityOffset = 0; loadEntities()">
             <span x-text="s.label"></span>
           </button>
         </template>
         <div class="flex-1"></div>
+        <input x-model="entitySearch" @input.debounce.350ms="entityOffset = 0; loadEntities()"
+               placeholder="search name, ID, vendor"
+               class="w-48 bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2.5 py-1.5 focus:outline-none focus:border-signal-glow/40">
+        <div class="text-[10px] text-slate-500 num"
+             x-text="entityTotal ? 'showing ' + (entityOffset + 1) + '–' + Math.min(entityOffset + entities.length, entityTotal) + ' of ' + entityTotal : 'showing 0'"></div>
+        <button @click="entityPage(-1)" :disabled="entityOffset === 0"
+                class="text-xs px-2 py-1 rounded border border-ink-600/40 disabled:opacity-30">←</button>
+        <button @click="entityPage(1)" :disabled="entityOffset + entities.length >= entityTotal"
+                class="text-xs px-2 py-1 rounded border border-ink-600/40 disabled:opacity-30">→</button>
         <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Sort</div>
-        <select x-model="entityOrder" @change="loadEntities()"
+        <select x-model="entityOrder" @change="entityOffset = 0; loadEntities()"
                 class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2.5 py-1.5 focus:outline-none focus:border-signal-glow/40">
           <option value="active">most recent</option>
           <option value="anomaly">anomaly score</option>
@@ -1159,11 +1283,221 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- PRIVATE HTTPS -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Transport security</div>
+            <div class="text-base font-semibold">Private HTTPS</div>
+            <div class="text-[11px] text-slate-500 mt-1 max-w-3xl">
+              Traffic is encrypted on port 443. Install this Watchtower's private CA once on each trusted phone or computer to remove the browser warning, then use <span class="font-mono text-slate-300">https://watchtower.local/</span>.
+            </div>
+          </div>
+          <a href="/watchtower-ca.crt" download="watchtower-ca.crt"
+             class="shrink-0 text-center px-3 py-2 rounded-md border border-signal-glow/40 text-signal-glow text-xs">
+            download CA certificate
+          </a>
+        </div>
+        <div class="text-[10px] text-slate-600 mt-2">The CA private key stays root-only on the Pi. Port 80 serves only this public CA download and HTTPS redirects.</div>
+      </div>
+
+      <!-- WI-FI -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Connectivity</div>
+            <div class="text-base font-semibold">Wi-Fi networks</div>
+            <div class="text-[11px] text-slate-500 mt-1" x-show="wifi.current">
+              Connected to <span class="text-signal-pulse font-medium" x-text="wifi.current?.ssid"></span>
+              <span class="num" x-text="` · ${wifi.current?.signal || 0}%`"></span>
+            </div>
+            <div class="text-[11px] text-signal-warm mt-1" x-show="!wifi.current">Wi-Fi is not currently connected.</div>
+            <div class="text-[11px] text-signal-warm mt-2" x-show="wifi.fallback_access_point?.active">
+              Recovery mode is active. This open hotspot provides DHCP; configure a network here, then reconnect your device to that network.
+              Nearby SSIDs are cached just before hotspot startup and refreshed during known-network retries.
+            </div>
+          </div>
+          <button @click="loadWifi(true)" :disabled="wifiLoading"
+                  class="px-3 py-1.5 rounded-md border border-signal-glow/40 text-signal-glow text-xs disabled:opacity-40">
+            <span x-text="wifiLoading ? 'scanning…' : 'scan again'"></span>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Networks in range</div>
+            <div class="space-y-1 max-h-64 overflow-y-auto scrollbar pr-1">
+              <template x-for="network in wifi.networks" :key="network.ssid + ':' + network.security">
+                <button @click="chooseWifi(network)" class="w-full flex items-center gap-3 rounded-lg px-3 py-2 border text-left transition"
+                        :class="wifiConnectSsid === network.ssid ? 'border-signal-glow/50 bg-signal-glow/10' : 'border-ink-600/30 bg-ink-700/20 hover:border-ink-600'">
+                  <div class="w-9 text-xs num" :class="network.signal >= 60 ? 'text-signal-pulse' : network.signal >= 35 ? 'text-signal-warm' : 'text-slate-500'" x-text="network.signal + '%' "></div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm truncate" x-text="network.ssid"></div>
+                    <div class="text-[10px] text-slate-500" x-text="network.security === 'open' ? 'Open network' : network.security_label"></div>
+                  </div>
+                  <span x-show="network.connected" class="text-[9px] uppercase text-signal-pulse">connected</span>
+                </button>
+              </template>
+              <div x-show="!wifiLoading && !(wifi.networks || []).length" class="text-xs text-slate-500 py-5 text-center">No networks found.</div>
+            </div>
+          </div>
+
+          <form @submit.prevent="connectWifi()" class="space-y-3">
+            <div x-show="!wifi.fallback_access_point?.active">
+              <label class="text-[10px] uppercase tracking-wider text-slate-500">SSID</label>
+              <input type="text" maxlength="32" required x-model="wifiConnectSsid" placeholder="Select above or type a hidden SSID"
+                     class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] uppercase tracking-wider text-slate-500">Security</label>
+                <select x-model="wifiConnectSecurity" class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-2 py-2 text-sm">
+                  <option value="wpa2">WPA2</option><option value="wpa3">WPA3</option><option value="open">Open</option>
+                </select>
+              </div>
+              <div class="col-span-2" x-show="wifiConnectSecurity !== 'open'">
+                <label class="text-[10px] uppercase tracking-wider text-slate-500">Wi-Fi password</label>
+                <input type="password" minlength="8" maxlength="63" :required="wifiConnectSecurity !== 'open'" autocomplete="new-password" x-model="wifiPassword"
+                       class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+              </div>
+            </div>
+            <div>
+              <label class="text-[10px] uppercase tracking-wider text-slate-500">Setup token</label>
+              <input type="password" autocomplete="off" x-model="wifiToken" @change="saveWifiToken()" placeholder="One-time token from the Pi"
+                     class="mt-1 w-full font-mono bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-signal-glow/40">
+              <div class="text-[10px] text-slate-500 mt-1">Stored only in this browser tab. Retrieve once with <span class="font-mono">cat /etc/watchtower/wifi-admin.token</span>.</div>
+            </div>
+            <div x-show="wifi.fallback_access_point?.active" class="text-[10px] text-slate-500">
+              A setup token is not required from a device connected directly to the Watchtower recovery hotspot.
+            </div>
+            <button type="submit" :disabled="wifiBusy || !wifiConnectSsid || (!wifiToken && !wifi.fallback_access_point?.active)"
+                    class="w-full px-3 py-2 rounded-md bg-signal-pulse text-ink-900 text-sm font-semibold disabled:opacity-40">
+              <span x-text="wifiBusy ? 'applying change…' : 'connect and remember'"></span>
+            </button>
+            <div class="text-xs rounded-md px-3 py-2 bg-ink-700/30" x-show="wifiMessage" x-text="wifiMessage"></div>
+          </form>
+        </div>
+
+        <div class="mt-4" x-show="(wifi.saved || []).length">
+          <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Remembered networks</div>
+          <div class="flex flex-wrap gap-2">
+            <template x-for="profile in wifi.saved" :key="profile.uuid">
+              <div class="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-ink-700/30 border border-ink-600/30 text-xs">
+                <span x-text="profile.ssid || profile.name"></span>
+                <span x-show="profile.active" class="text-[9px] text-signal-pulse uppercase">active</span>
+                <button x-show="!profile.active" @click="forgetWifi(profile)" class="text-threat hover:underline">forget</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOCAL IDENTITY + AUTHORIZED DECRYPTION -->
+      <div id="identity-controls" class="glass rounded-2xl p-5">
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Local identity</div>
+            <div class="text-base font-semibold">Friendly names &amp; authorized decryption</div>
+            <div class="text-[11px] text-slate-500 mt-1 max-w-3xl">Resolve names from Bluetooth Classic, paired BlueZ aliases, mDNS/DNS-SD, UPnP and DHCP. For owned devices, imported EAD, IRK, or Fast Pair account keys unlock authenticated protocol-defined names. Keys never leave this Pi and are encrypted at rest.</div>
+          </div>
+          <button @click="loadIdentity(true)" :disabled="identityBusy || !wifiToken"
+                  class="px-3 py-1.5 rounded-md border border-signal-glow/40 text-signal-glow text-xs disabled:opacity-40">
+            <span x-text="identityBusy ? 'working…' : 'load devices'"></span>
+          </button>
+        </div>
+
+        <div class="rounded-lg border border-signal-warm/25 bg-signal-warm/5 px-3 py-2 text-[11px] text-slate-400 mb-4">
+          AirTag and Tile owner labels are not transmitted in their radio advertisements and cannot be recovered from them. Watchtower reports those devices from protocol fingerprints and accepts your own catalog labels; decryption here is limited to keys you own or obtain through authorized pairing.
+        </div>
+
+        <div class="rounded-lg border border-signal-glow/30 bg-signal-glow/5 px-3 py-3 mb-4">
+          <div class="text-xs font-semibold text-signal-glow">Identify AirPods or another Apple audio accessory</div>
+          <ol class="mt-1 text-[11px] text-slate-400 leading-relaxed list-decimal list-inside">
+            <li>Place the accessory next to Watchtower and put it in Bluetooth pairing mode until its status light flashes white.</li>
+            <li>Enter the setup token, then select <span class="text-signal-glow">scan / identify AirPods</span>.</li>
+            <li>When its disclosed name appears below, select <span class="text-signal-pulse">pair</span> to retain its trusted BlueZ alias.</li>
+          </ol>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <form @submit.prevent="addIdentityKey()" class="space-y-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Import an owned-device key</div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-[10px] text-slate-500">Key type</label>
+                <select x-model="identityKey.key_type" class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-2 py-2 text-xs">
+                  <option value="fast_pair_account">Fast Pair account key · 16 bytes</option>
+                  <option value="ble_ead">Bluetooth EAD key + IV · 24 bytes</option>
+                  <option value="ble_irk">Bluetooth identity key · 16 bytes</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-slate-500">Label</label>
+                <input x-model="identityKey.label" required maxlength="80" placeholder="My earbuds"
+                       class="mt-1 w-full bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-xs">
+              </div>
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500">Scope</label>
+              <input x-model="identityKey.scope" required placeholder="* or AA:BB:CC:DD:EE:FF"
+                     class="mt-1 w-full font-mono bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-xs">
+              <div class="text-[10px] text-slate-500 mt-1">Use a device MAC when known. <span class="font-mono">*</span> tries this key only against matching authenticated packets.</div>
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500">Hex key material</label>
+              <input type="password" autocomplete="new-password" x-model="identityKey.secret" required spellcheck="false"
+                     placeholder="hexadecimal; spaces and colons are accepted"
+                     class="mt-1 w-full font-mono bg-ink-700/40 border border-ink-600/40 rounded-md px-3 py-2 text-xs">
+            </div>
+            <button type="submit" :disabled="identityBusy || !wifiToken"
+                    class="w-full px-3 py-2 rounded-md bg-signal-pulse text-ink-900 text-sm font-semibold disabled:opacity-40">encrypt and import</button>
+          </form>
+
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Encrypted local vault</div>
+            <div class="space-y-1 max-h-60 overflow-y-auto scrollbar">
+              <template x-for="key in nameKeys" :key="key.key_id">
+                <div class="flex items-center gap-2 rounded-lg border border-ink-600/30 bg-ink-700/25 px-3 py-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs truncate" x-text="key.label"></div>
+                    <div class="text-[9px] font-mono text-slate-500" x-text="key.key_type + ' · ' + key.scope"></div>
+                  </div>
+                  <span x-show="key.last_used_unix" class="text-[9px] uppercase text-signal-pulse">verified</span>
+                  <button @click="deleteIdentityKey(key)" class="text-[10px] text-threat">delete</button>
+                </div>
+              </template>
+              <div x-show="!nameKeys.length" class="text-xs text-slate-500 text-center py-6">Unlock with the setup token to view keys. Secret material is never displayed.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-5 border-t border-ink-600/30 pt-4">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Bluetooth devices</div>
+            <button @click="scanBluetooth()" :disabled="identityBusy || !wifiToken" class="text-xs text-signal-glow disabled:opacity-40">scan / identify AirPods</button>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto scrollbar">
+            <template x-for="device in bluetoothDevices" :key="device.address">
+              <div class="rounded-lg border border-ink-600/30 bg-ink-700/20 px-3 py-2 flex items-center gap-2">
+                <div class="min-w-0 flex-1">
+                  <div class="text-xs truncate" x-text="device.alias || device.name || 'Unnamed Bluetooth device'"></div>
+                  <div class="text-[9px] font-mono text-slate-500" x-text="device.address"></div>
+                  <div class="text-[9px] text-slate-500" x-text="device.paired ? 'paired · BlueZ identity resolution active' : 'not paired'"></div>
+                </div>
+                <button x-show="!device.paired" @click="pairBluetooth(device)" class="text-[10px] text-signal-pulse">pair</button>
+                <button @click="decryptFastPairName(device)" class="text-[10px] text-signal-glow">Fast Pair name</button>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div class="mt-3 text-xs rounded-md px-3 py-2 bg-ink-700/30" x-show="identityMessage" x-text="identityMessage"></div>
+      </div>
+
       <!-- THRESHOLDS -->
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection thresholds</div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <template x-for="key in ['linger_threshold_sec', 'anchor_timeout_sec', 'close_perimeter_rssi_dbm', 'after_hours_start_utc', 'after_hours_end_utc', 'anomaly_severity_high_threshold', 'anomaly_severity_medium_threshold']" :key="key">
+          <template x-for="key in ['linger_threshold_sec', 'anchor_timeout_sec', 'close_perimeter_rssi_dbm', 'after_hours_start_utc', 'after_hours_end_utc', 'anomaly_severity_high_threshold', 'anomaly_severity_medium_threshold', 'intrusion_episode_window_sec', 'intrusion_away_threshold', 'intrusion_home_threshold']" :key="key">
             <div>
               <label class="block">
                 <div class="flex items-baseline justify-between mb-1">
@@ -1182,7 +1516,7 @@ tailwind.config = {
       <div class="glass rounded-2xl p-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Detection rules</div>
         <div class="space-y-2">
-          <template x-for="key in ['rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_findmy_persistent_tracker','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged']" :key="key">
+          <template x-for="key in ['rule_multi_signal_intrusion','rule_anchor_absent_unknown_linger','rule_unknown_keyfob_emission','rule_unknown_garage_emission','rule_airtag_findmy_present','rule_findmy_persistent_tracker','rule_first_time_visitor_after_hours','rule_close_unknown_signal','rule_rogue_hotspot','rule_honeypot_engaged','rule_flipper_zero_detected']" :key="key">
             <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
               <input type="checkbox" x-model="settings[key]" @change="settingsDirty = true"
                      class="w-4 h-4 mt-0.5 rounded accent-signal-pulse">
@@ -1200,14 +1534,30 @@ tailwind.config = {
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Active features</div>
         <div class="space-y-3">
           <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
+            <input type="checkbox" x-model="settings.classic_name_discovery_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
+            <div class="flex-1">
+              <div class="text-sm font-medium">Bluetooth Classic remote names</div>
+              <div class="text-[11px] text-slate-500">Periodically performs bounded BR/EDR inquiry and imports BlueZ remote names and trusted aliases. Pairing remains an explicit action above.</div>
+            </div>
+          </label>
+          <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
+            <input type="checkbox" x-model="settings.lan_name_discovery_enabled" @change="settingsDirty = true"
+                   class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
+            <div class="flex-1">
+              <div class="text-sm font-medium">LAN friendly-name discovery</div>
+              <div class="text-[11px] text-slate-500">Resolves local devices through mDNS/DNS-SD, UPnP descriptions, DHCP hostnames and reverse DNS. UPnP fetches are restricted to the private responder address.</div>
+            </div>
+          </label>
+          <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
             <input type="checkbox" x-model="settings.active_probing_enabled" @change="settingsDirty = true"
                    class="w-4 h-4 mt-0.5 rounded accent-signal-glow">
             <div class="flex-1">
               <div class="text-sm font-medium flex items-center gap-2">
-                <span>Active GATT probing</span>
+                <span>Local BLE name resolution</span>
                 <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/15 text-signal-glow">advanced</span>
               </div>
-              <div class="text-[11px] text-slate-500">Briefly connect to BLE devices to read their friendly name, manufacturer, and model. Most consumer devices respond. iPhones, AirTags, and locks reject. Off by default for privacy.</div>
+              <div class="text-[11px] text-slate-500">Briefly connects to nearby BLE devices and reads standardized public Device Name, manufacturer, and model fields. Names are scored locally with provenance; paired or protected data is never bypassed. Off by default.</div>
             </div>
           </label>
           <label class="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-ink-700/30 cursor-pointer transition">
@@ -1438,11 +1788,46 @@ tailwind.config = {
             </div>
             <div class="flex-1 min-w-0">
               <input class="w-full bg-transparent text-xl font-bold tracking-tight outline-none border-b border-transparent hover:border-ink-600/60 focus:border-signal-glow/60 transition py-0.5"
-                     :value="entityDetail.entity?.friendly_name || entityDisplayName(entityDetail.entity)"
-                     @blur="renameEntity($event.target.value)" placeholder="Name this entity…"/>
+                     :value="entityDetail.entity?.friendly_name || ''"
+                     @blur="renameEntity($event.target.value)"
+                     :placeholder="'Suggested: ' + entityDisplayName(entityDetail.entity)"/>
               <div class="text-[10px] font-mono text-slate-500 mt-0.5" x-text="entityDetail.entity?.entity_id"></div>
+              <div x-show="entityDetail.entity?.friendly_name_source" class="flex items-center gap-2 mt-1">
+                <span class="text-[9px] uppercase tracking-wider px-1.5 py-px rounded bg-signal-glow/10 text-signal-glow"
+                      x-text="nameSourceLabel(entityDetail.entity?.friendly_name_source)"></span>
+                <span class="text-[10px] text-slate-500"
+                      x-text="Math.round((entityDetail.entity?.friendly_name_confidence || 0) * 100) + '% confidence'"></span>
+              </div>
             </div>
             <button @click="entityDetail = null" class="text-slate-500 hover:text-slate-200 text-2xl">×</button>
+          </div>
+
+          <!-- local name evidence -->
+          <div class="mb-4" x-show="entityDetail.name_candidates?.length">
+            <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Local name evidence</div>
+            <div class="space-y-1">
+              <template x-for="candidate in entityDetail.name_candidates" :key="candidate.source + candidate.name">
+                <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-800/50 border border-ink-700/40">
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-slate-200 truncate" x-text="candidate.name"></div>
+                    <div x-show="nameEvidenceLabel(candidate)" class="text-[9px] font-mono text-slate-500 truncate"
+                         x-text="nameEvidenceLabel(candidate)"></div>
+                  </div>
+                  <span class="text-[9px] text-slate-500" x-text="nameSourceLabel(candidate.source)"></span>
+                  <span class="text-[10px] num text-signal-glow" x-text="Math.round(candidate.confidence * 100) + '%'"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div class="mb-4 px-3 py-3 rounded-lg bg-signal-glow/5 border border-signal-glow/30"
+               x-show="isAppleProximity(entityDetail.entity)">
+            <div class="text-xs font-semibold text-signal-glow">Apple proximity traffic detected</div>
+            <div class="text-[11px] text-slate-400 mt-1">Watchtower sees the accessory, but this advertisement did not disclose its personalized name. Put the AirPods in pairing mode to request the Bluetooth name.</div>
+            <button @click="openAppleIdentify()"
+                    class="mt-2 w-full px-3 py-2 rounded-md bg-signal-glow/10 border border-signal-glow/40 text-signal-glow text-xs font-semibold">
+              Open AirPods identification guide
+            </button>
           </div>
 
           <!-- classification picker -->
@@ -1618,6 +2003,6 @@ tailwind.config = {
   </nav>
 </div>
 
-<script src="/assets/app.js?v=2026050502"></script>
+<script src="/assets/app.js?v=20260816-apple-identify"></script>
 </body>
 </html>

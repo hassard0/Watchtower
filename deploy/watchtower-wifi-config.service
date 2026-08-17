@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply a Watchtower Wi-Fi configuration request
+After=NetworkManager.service
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-wifi-config
+User=root
+Group=root
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/watchtower-wifi /etc/NetworkManager/system-connections

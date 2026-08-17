@@ -12,7 +12,7 @@ don't belong to anyone in the family.
 
 It is **standalone** (no cloud, no internet required), runs as a
 single systemd-supervised Python process, and exposes a real-time
-dashboard at `http://watchtower.local:8080` plus a separate mobile
+dashboard at `http://watchtower.local` plus a separate mobile
 calibration page at `/probe`.
 
 ---
@@ -57,12 +57,14 @@ The thing Watchtower is designed to catch:
 | Rogue mobile hotspot used as a staging point | Random-BSSID Wi-Fi AP with strong signal that *isn't* on the home network |
 | Visitor under-the-radar at unusual hours | First-time entity arriving inside the configured **after-hours window** |
 | Active probing of decoy devices | Outbound BLE GATT connection attempts to the Pi's **honeypot lures** |
+| Nearby Flipper Zero | High-confidence match on the official firmware's BLE name plus serial-service UUID |
 
 Out of scope (and explicitly *not* implemented):
 
 - Cellular IMSI catching or anything else illegal in most jurisdictions
 - Decryption / cracking of rolling codes — we detect *that* a code was
-  emitted, not *what* the code is
+  emitted, retain lawful decoder metadata, and group it by any exposed stable
+  device ID; changing codes, MICs, and opaque payloads are never treated as identity
 - Capturing audio / video / network content
 - Tracking residents or guests they've consented to (anchors and
   satellites are intentionally exempted from most rules once enrolled)
@@ -96,7 +98,7 @@ DETECTION     7 declarative rules, all toggleable + tunable from the dashboard.
               Each fires an Alert with structured evidence.
 
 OUTPUT        SQLite (WAL mode, 64 MB cache, 256 MB mmap) with hourly pruner
-              aiohttp /api/* + static SPA at port 8080
+              loopback aiohttp + private-CA HTTPS on 443; port 80 redirects
               optional ntfy push, generic webhook, and MQTT publish per alert
 ```
 
@@ -166,16 +168,36 @@ Crucial extras:
   `standards-oui.ieee.org`) at `/var/lib/watchtower/oui-cache.txt`.
   Stable-MAC entities self-identify as "eero inc.", "Espressif",
   "Samsung", "Sagemcom", "TP-Link" etc. without any active probing.
-- **GATT prober** — when an unknown device shows up, the prober
-  briefly pauses the passive scan and tries a polite GATT connect to
-  read the *Device Name* characteristic. Most phones, watches, and
-  earbuds happily reveal their model name this way (e.g. "iPhone",
-  "Apple Watch", "[TV] Samsung The Frame (49)").
+- **Local friendly-name resolver** — advertised BLE names, Bluetooth Classic
+  Remote Name results, trusted BlueZ aliases, standardized GATT Device
+  Name/model fields, Wi-Fi WPS metadata, SSIDs, mDNS/DNS-SD, UPnP, DHCP, and
+  reverse DNS are retained as confidence-scored candidates. The UI shows the
+  winning name's provenance; an explicit user label always wins.
+- **Authorized name decryption** — the Settings gear accepts keys from
+  devices you own: Bluetooth Encrypted Advertising Data session key + IV,
+  Bluetooth IRKs, and Google Fast Pair account keys. EAD names are decrypted
+  passively with AES-CCM; IRKs resolve rotating private addresses; Fast Pair
+  personalized names are accepted only after the protocol HMAC verifies.
+  Keys are Fernet-encrypted with a separate mode-0600 master key at
+  `/var/lib/watchtower/name-vault.key`; APIs never return secret material.
+  No key guessing or brute force is implemented.
+- **GATT prober** — when enabled, the prober briefly pauses the passive
+  scan and tries a polite GATT connection to read public *Device Name*,
+  manufacturer, and model characteristics. Devices that require pairing
+  simply reject the read. Automatic probes do not collect serial numbers.
 - **Apple Continuity decoder** — Apple devices broadcast a 0x4C00
   manufacturer-data prefix with an inner subtype byte. We decode
   AirDrop / AirPlay / Find-My / Nearby-Info / Proximity-Pairing
-  (with a 25-model lookup table) and surface the human-readable
-  state under the entity row.
+  model and state fields and surface them under the entity row. Rotating
+  authentication and contact-derived hash material is not retained.
+- **Apple ecosystem name fusion** — Bonjour discovery explicitly queries
+  AirPlay, RAOP, Companion Link, device-info, mobile-device, sleep-proxy,
+  and HomeKit services. Watchtower separates human service-instance names
+  from models and opaque identifiers, normalizes RAOP prefixes, and records
+  every result with protocol provenance. When Apple publishes an exact
+  Bluetooth address in local-link TXT metadata, the name is copied to an
+  already-observed matching BLE entity; no fuzzy or rotation-breaking join
+  is attempted.
 
 ### Wi-Fi scanner (`wlan0`)
 
@@ -234,19 +256,52 @@ tagged with `_decoded_offline=true`. This trades latency (decode
 happens up to a few seconds after the burst) for **multi-frequency
 coverage from a single SDR**.
 
-### Find-My listener and cluster tracker
+### Unwanted location-tracker listener and clustering
 
-Apple's Find-My network broadcasts have manufacturer-data prefix
-`0x4C 0x00 0x12`. The cluster tracker:
+The passive BLE scanner recognizes four protocol-backed families:
+
+- legacy Apple Find My manufacturer data (`0x4C 0x00 0x12`);
+- Tile-assigned service UUIDs (`0xFD84`, `0xFEEC`, `0xFEED`) and
+  Tile's Bluetooth company ID (`0x067C`);
+- Google Find Hub `0xFEAA` frames, including the explicit `0x41`
+  unwanted-tracking-protection state;
+- the cross-platform Detecting Unwanted Location Trackers service-data
+  UUID (`0xFCB2`), including network provider and near-owner/separated state.
+
+The cluster tracker:
 
 - Joins **rotating MAC addresses** back into stable cluster IDs by
   matching consecutive observations on RSSI continuity (the
   rotating MAC changes every ~15 minutes but the RSSI doesn't jump).
-- Computes **Jaccard co-presence** between each cluster and each
-  enrolled anchor over a 1-day window — if an AirTag's presence
-  buckets overlap an anchor's by ≥0.55, we infer *probably theirs*.
-- Surfaces the result on the Find-My tab as
-  *"AirTag (probably Ian's)"* vs *"unidentified tracker"*.
+- Computes **Jaccard sensor co-presence** between each cluster and each
+  enrolled anchor over a 1-day window. This is contextual correlation,
+  not proof of ownership or proof that the tracker travelled with a person.
+- Alerts on protocol confidence, separated state, proximity, and the history
+  of each individual cluster. Unrelated neighbors' devices cannot combine
+  into one persistent-tracker alert.
+
+Apple/Tile owner labels are not present in their radio advertisements.
+Watchtower therefore does not claim to decrypt a stranger's identity; use
+iOS/Android unwanted-tracker alerts for the authorized physical-identification
+and disablement flow. User-owned tracker catalog labels remain supported.
+
+### Local identity controls
+
+Open **Settings → Friendly names & authorized decryption**, enter the setup
+token, then load devices. From there you can:
+
+- run a bounded Bluetooth Classic inquiry and import Remote Name results;
+- explicitly pair an owned device, enabling BlueZ identity resolution and
+  trusted aliases and importing EAD key material when the authenticated
+  characteristic permits it;
+- import a 16-byte Fast Pair account key and request the device's personalized
+  name, a 24-byte EAD session-key/IV bundle, or a 16-byte Bluetooth IRK;
+- enable or disable automatic Classic and LAN friendly-name discovery.
+
+The key label is only a local description. A decrypted name is promoted only
+after AES-CCM or Fast Pair HMAC authentication succeeds; an IRK identity is
+promoted only after its address hash resolves. Removing a key stops future
+decryption while retaining past name evidence for auditability.
 
 ### Find-My owned-tracker catalog
 
@@ -300,25 +355,27 @@ take effect immediately without restart.
 | `anchor_absent_unknown_linger` | An unknown entity has been continuously present for longer than `linger_threshold_sec` (default 600 s) while no anchor is home |
 | `unknown_keyfob_emission` | A sub-GHz **key-fob** protocol was decoded (315 / 433 / 868 MHz, etc.) and we don't have a household device with that protocol fingerprint enrolled |
 | `unknown_garage_emission` | Same, but for garage-door protocols (Liftmaster Security+, Genie Intellicode, Chamberlain, Marantec, Stanley) |
-| `airtag_findmy_present` | An Apple Find-My broadcast was observed, severity scaled by RSSI proximity. *Owned* AirTags suppress the rule |
-| `findmy_persistent_tracker` | A non-owned Find-My cluster has been present for ≥ `findmy_persistent_min_minutes_per_day` (default 180 min) on each of the last `findmy_persistent_min_consecutive_days` (default 3) days. Indicates a tracker hidden in a vehicle / bag |
+| `airtag_findmy_present` | A protocol-confirmed Apple, Tile, or DULT tracker is strongly in range; separated state increases its risk score |
+| `findmy_persistent_tracker` | The same unclassified tracker cluster has been present for ≥ `findmy_persistent_min_minutes_per_day` (default 180 min) on each of the last `findmy_persistent_min_consecutive_days` (default 3) days |
 | `first_time_visitor_after_hours` | New entity first-seen between `after_hours_start_utc` and `after_hours_end_utc` (default 22:00-06:00 UTC). Requires at least one anchor enrolled so a fresh setup doesn't blast alerts |
 | `close_unknown_signal` | Unknown BLE entity with avg RSSI > `close_perimeter_rssi_dbm` (default −50 dBm) and recurring presence (skips stationary IoT) |
-| `rogue_hotspot` | Wi-Fi AP with locally-administered (random) BSSID and strong signal — the smell test for a phone hotspot or rogue access point near the property |
+| `rogue_hotspot` | Named AP beacon with a locally-administered BSSID that is genuinely new, repeats, and is stronger than −55 dBm. Established APs and the Watchtower recovery SSID are excluded |
 | `honeypot_engaged` | Inbound GATT connection to the Pi's lure name |
+| `flipper_zero_detected` | Official `Flipper <device-name>` BLE format and 0x3080–0x3083 serial-service UUID appear together. Name-only matches are informational to avoid easy spoofing |
+| `multi_signal_intrusion` | At least two independent signal families occur in a five-minute episode, the context-adjusted score crosses its threshold, and one signal is decisive (key-fob/garage traffic, honeypot contact, or high-confidence Flipper detection). Multiple BLE symptoms never stack as independent evidence |
 
 Severity is one of `critical / high / medium / low` and drives the
 dashboard banner color and (when configured) the ntfy push priority.
 
 ---
 
-## The dashboard at `:8080`
+## The private-HTTPS dashboard
 
 | Tab | What you see |
 | --- | --- |
-| **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), live RF radar with RSSI as radial distance, top anomalies, scanner activity bars (BLE / Wi-Fi / Sub-GHz / Mid-band, all colored), baseline learning progress, "entropy of the room" envelope plot |
-| **Discover** | Auto-suggested enrollment candidates ranked by stability. One-tap classify into Anchor / Satellite / Known guest / Untrusted. Active **GATT probe** button asks the device for its name in real time. |
-| **Entities** | Sortable, filterable table of every tracked entity with anomaly bars and regularity meters. Each row shows source antenna + frequency band ("BLE 2.4 GHz", "Wi-Fi 2.4 GHz", "Sub-GHz 433 MHz", "RF 915 MHz") and IEEE OUI vendor when known. |
+| **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), explainable presence episodes and short-lived anonymous BLE flows, live RF radar with RSSI as radial distance, top anomalies, scanner activity bars, baseline learning progress, and the "entropy of the room" envelope plot |
+| **Discover** | Complete ranked enrollment queue with a persistent 15-minute browser cache, 60-second background refresh, client-side text/source/name/observation filters, multiple sorts, progressive rendering, and one-tap classification. |
+| **Entities** | Searchable, paged inventory that defaults to every identity seen in the last seven days. Active Now and All History remain explicit filters; “showing X of Y” prevents hidden caps. |
 | **Timeline** | 1 h / 6 h / 24 h / 3 d / 7 d scrubbable visit timeline, color-coded by classification and anomaly score |
 | **Spectrum** | Live energy waterfall per band (HF / FM / VHF / NOAA / Keyfob-303 / Keyfob-315 / TPMS-345 / Garage-390 / EU-Keyfob-418 / ISM-433 / FRS-GMRS / EU-SRD-868 / ISM-902 / Cellular-850 / LTE-700 / ADS-B / GPS / Sat-DL …), plus the protocol-decode log for any sub-GHz traffic the live + offline rtl_433 caught |
 | **Find-My** | Live observer table (rotating MACs in the last 5 min), stable cluster list with co-presence-inferred owners, owned-tracker catalog with paste-master-secret enrollment, daily presence chart |
@@ -371,7 +428,7 @@ Live measurements on the reference build:
 
 ---
 
-## Schema (v5)
+## Schema (v10)
 
 SQLite at `/var/lib/watchtower/watchtower.db`. WAL mode.
 
@@ -385,6 +442,8 @@ SQLite at `/var/lib/watchtower/watchtower.db`. WAL mode.
 | `zones` / `zone_samples` / `probe_captures` | RF fingerprints from the phone calibration page | indefinite / cleared on save |
 | `findmy_clusters` / `findmy_cluster_macs` | rotating-MAC tracking + cluster identity | clusters pruned after 7 days idle |
 | `findmy_owned_trackers` / `findmy_key_catalog` | user-owned AirTag enrollment + pre-computed slot pubkeys | indefinite |
+| `presence_tracklets` / `presence_tracklet_macs` | temporary advertisement-shape continuity across BLE privacy-address handoffs; explicitly not permanent device identities | marked departed after 5 min idle; query window is bounded |
+| `intrusion_signals` / `intrusion_episodes` | auditable multi-radio behavioral evidence, family-level scores, context, and alert decisions | signals pruned after 24 h; episodes retained |
 | `analytics_state` | rollup watermark, runtime settings overrides, honeypot state | indefinite |
 
 ---
@@ -398,10 +457,12 @@ ssh admin@watchtower.local "bash" < deploy/pi-setup.sh
 sudo reboot   # to apply the DVB-driver blacklist
 ```
 
-Installs `bluez`, `rtl-sdr`, `rtl-433`, `iw`, `sqlite3`; blacklists
+Installs `bluez`, `rtl-sdr`, `rtl-433`, `iw`, `sqlite3`, and `nginx`; blacklists
 the kernel DVB drivers so RTL-SDR can claim the dongles; installs
 udev rules for non-root SDR access; adds `admin` to the `bluetooth`
-and `plugdev` groups; creates the watchtower data directories.
+and `plugdev` groups; creates the watchtower data directories. The HTTPS
+installer creates a stable private CA under `/etc/watchtower/tls`, serves
+the dashboard on 443, and keeps port 80 as a redirect/bootstrap endpoint.
 
 ### Develop on your host
 
@@ -411,7 +472,7 @@ uv sync
 uv run pytest -v
 ```
 
-44 unit tests + 6 integration tests (skipped unless
+67 unit tests + 8 integration tests (skipped unless
 `WATCHTOWER_PI_HOST` is set). Mock-driven; doesn't require hardware.
 
 ### Deploy to the Pi
@@ -432,7 +493,48 @@ systemctl is-active watchtower
 sudo journalctl -u watchtower -f
 ```
 
-Open `http://watchtower.local:8080` in a browser.
+Download `http://watchtower.local/watchtower-ca.crt` and install it as a
+trusted root certificate on each device you control. Then open
+`https://watchtower.local/`. The CA private key never leaves the Pi; its
+public certificate is also available from Settings. The leaf certificate
+is refreshed automatically when the Pi's LAN addresses change.
+
+### Network and boot recovery
+
+Deployment installs `watchtower-wifi-reconnect.timer`. Once a minute, while
+`wlan0` is disconnected, it unblocks the radio and tries every saved
+NetworkManager Wi-Fi profile. Saved profiles retry indefinitely and Wi-Fi
+power saving is disabled. If none connects, the Pi starts an open
+`Watchtower` recovery SSID at `http://10.42.0.1/`; NetworkManager shared mode
+provides DHCP, DNS forwarding, and NAT. The hotspot pauses briefly every five
+minutes to retry known client networks and returns if none connects. On first
+install, if NetworkManager has no Wi-Fi
+profiles, the installer migrates Raspberry Pi Imager's root-only
+`/boot/firmware/network-config` into netplan without copying credentials into
+this repository.
+
+Open the Settings gear in the dashboard to scan nearby networks, select an
+SSID, choose WPA2/WPA3/open security, and connect. Wi-Fi mutations require a
+setup token so an unauthenticated browser on the LAN cannot replace the Pi's
+network configuration. Retrieve the token once on the Pi:
+
+```bash
+cat /etc/watchtower/wifi-admin.token
+```
+
+First-time setup from a client directly connected to the recovery subnet is
+the narrow exception: while the fallback AP is active, a `10.42.0.0/24`
+client may submit one connection without a token. Forgetting profiles and all
+ordinary LAN changes remain token-protected.
+
+The browser keeps that token in `sessionStorage` only. Passwords are handed to
+a root-owned NetworkManager helper through a mode-0600 runtime file, never a
+shell command or process argument. The helper activates the new profile before
+removing an older duplicate, and the recovery timer keeps retrying every saved
+SSID after reboot or an outage.
+
+The main service retries indefinitely at 15-second intervals after a failure,
+each radio scanner restarts independently after a transient failure, and SQLite-locked event batches are queued for retry rather than discarded.
 
 ### First-run flow
 
@@ -482,15 +584,16 @@ Settings UI (toggleable from the dashboard at runtime):
   prefix
 - Honeypot enable + rotation cadence
 - Find-My tracker broadcaster enable
-- Active GATT probing enable
+- Local BLE name-resolution probing enable
+- Bluetooth Classic remote-name discovery and LAN mDNS/UPnP/DHCP enrichment
+- Encrypted EAD / Fast Pair / IRK key management for owned devices
 
 ---
 
 ## Roadmap
 
-- **v1.5 (next)** — UPS HAT support, ntfy push routing, heartbeat /
-  watchdog, tamper detection, smarter active BLE GATT probing for
-  richer device identification
+- **v1.5 (next)** — UPS HAT support, heartbeat / watchdog, tamper detection,
+  and stronger multi-sensor tracker co-travel scoring
 - **v2** — vulcan (or other) cloud sink for cold-tier storage, ML
   training pipeline using user feedback as labels, Hailo-8L NPU for
   on-device autoencoder anomaly scoring
@@ -515,16 +618,22 @@ src/watchtower/
 ├── sub_decoder.py          # offline rtl_433 -r capture decoder
 ├── apple_continuity.py     # 0x4C00 subtype decoders (Find-My, Nearby-Info,
 │                           #   Proximity-Pairing 25-model lookup, AirDrop)
+├── flipper.py              # confidence-scored official BLE fingerprint
+├── rf_identity.py          # stable IDs from decoded/rolling RF envelopes
+├── wifi.py                 # safe NetworkManager status/request API
 ├── findmy_clusters.py      # rotating-MAC cluster tracker + co-presence inference
 ├── findmy_owned.py         # owned-tracker enrollment + EC-P224 catalog
 ├── findmy_tracker.py       # Pi-as-AirTag broadcaster
 ├── honeypot.py             # rotating BLE lure + connection log
 ├── active_probe.py         # GATT probe for unknown devices
+├── name_crypto.py          # EAD/Fast Pair/IRK crypto + encrypted key vault
+├── bluetooth_identity.py   # BlueZ names, pairing, authorized key/name reads
+├── local_discovery.py      # mDNS/DNS-SD, UPnP, DHCP, reverse-DNS names
 ├── oui.py                  # IEEE OUI registry loader (≈50 k prefixes)
 ├── analytics.py            # enrichment + rules + alert dispatch
 ├── api.py                  # aiohttp HTTP server + JSON API + cache warmer
 ├── storage/
-│   ├── schema.sql          # v5 schema
+│   ├── schema.sql          # v8 schema
 │   ├── db.py               # connection helper with PRAGMA tuning
 │   └── pruner.py           # retention pruner
 └── static/
@@ -532,7 +641,7 @@ src/watchtower/
     ├── probe.html          # mobile site-survey page
     └── assets/app.js       # ~1 k LOC dashboard logic
 
-tests/                      # 44 passing unit tests, 6 integration tests
+tests/                      # unit tests plus 8 Raspberry Pi integration tests
 deploy/                     # systemd unit + pi-setup.sh + deploy.sh
 docs/superpowers/           # design specs and milestone plans
 ```

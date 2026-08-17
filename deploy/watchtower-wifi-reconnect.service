@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconnect Watchtower to a saved Wi-Fi network
+After=NetworkManager.service
+Wants=NetworkManager.service
+ConditionPathExists=/sys/class/net/wlan0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/watchtower-wifi-reconnect
+TimeoutStartSec=5min

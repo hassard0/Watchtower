@@ -44,7 +44,8 @@ def _parse_iw_scan(output: str) -> list[dict]:
             if cur:
                 aps.append(cur)
             cur = {"bssid": m.group(1).lower(), "ssid": None, "channel": None,
-                   "signal": None, "freq": None, "encryption": None}
+                   "signal": None, "freq": None, "encryption": None,
+                   "manufacturer": None, "model": None, "device_name": None}
             continue
         if cur is None:
             continue
@@ -70,6 +71,20 @@ def _parse_iw_scan(output: str) -> list[dict]:
             cur["encryption"] = "WPA2"
         elif s.startswith("WPA:"):
             cur["encryption"] = cur.get("encryption") or "WPA"
+        elif "Authentication suites:" in s:
+            suites = s.split("Authentication suites:", 1)[1].upper()
+            if "SAE" in suites:
+                cur["encryption"] = "WPA3-SAE"
+            elif "OWE" in suites:
+                cur["encryption"] = "OWE"
+            elif "PSK" in suites and cur.get("encryption") != "WPA3-SAE":
+                cur["encryption"] = "WPA2"
+        elif s.startswith("* Manufacturer:"):
+            cur["manufacturer"] = s.split(":", 1)[1].strip() or None
+        elif s.startswith("* Model:"):
+            cur["model"] = s.split(":", 1)[1].strip() or None
+        elif s.startswith("* Device name:"):
+            cur["device_name"] = s.split(":", 1)[1].strip() or None
     if cur:
         aps.append(cur)
     return aps
@@ -131,12 +146,15 @@ class WifiScanner(Scanner):
                         is_random_mac=_is_random_bssid(ap["bssid"]) if ap.get("bssid") else None,
                         local_name=ap.get("ssid"),
                         frequency_hz=ap.get("freq") and ap["freq"] * 1_000_000,
-                        vendor_oui=vendor_for_mac(ap.get("bssid") or ""),
+                        vendor_oui=vendor_for_mac(ap.get("bssid") or "") or ap.get("manufacturer"),
                     )
                     feats.decoded = {
                         "ssid": ap.get("ssid"),
                         "channel": ap.get("channel"),
-                        "encryption": ap.get("encryption"),
+                        "encryption": ap.get("encryption") or "Open",
+                        "wps_manufacturer": ap.get("manufacturer"),
+                        "wps_model": ap.get("model"),
+                        "wps_device_name": ap.get("device_name"),
                     }
                     ev = Event(
                         scanner=ScannerName.WIFI,

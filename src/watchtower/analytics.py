@@ -24,6 +24,8 @@ from typing import Any
 from ulid import ULID
 
 from watchtower.storage.db import get_connection
+from watchtower.name_resolution import candidates_from_features, record_name_candidate
+from watchtower.name_crypto import NameKeyVault, decrypt_ead, local_name_from_ad, resolve_rpa
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +50,20 @@ DEFAULT_SETTINGS = {
     "rule_close_unknown_signal": True,
     "rule_rogue_hotspot": True,
     "rule_honeypot_engaged": True,
+    "rule_flipper_zero_detected": True,
     "rule_findmy_persistent_tracker": True,
+    "rule_multi_signal_intrusion": True,
+    "intrusion_episode_window_sec": 300,
+    "intrusion_away_threshold": 60,
+    "intrusion_home_threshold": 75,
     "findmy_persistent_min_minutes_per_day": 180,
     "findmy_persistent_min_consecutive_days": 3,
     "anomaly_severity_high_threshold": 0.6,
     "anomaly_severity_medium_threshold": 0.4,
     # M3+ extensions:
     "active_probing_enabled": False,         # GATT probe to fetch friendly names
+    "classic_name_discovery_enabled": True,  # BR/EDR remote names + paired BlueZ aliases
+    "lan_name_discovery_enabled": True,      # mDNS/DNS-SD, UPnP, DHCP, reverse DNS
     "honeypot_enabled": False,                # rotating BLE lure broadcaster
     "honeypot_rotate_minutes": 30,            # cycle through lure list every N min
     "findmy_tracker_enabled": False,          # broadcast as a Find-My-compatible AirTag
@@ -140,7 +149,7 @@ def _dispatch_external(settings: dict, alert_payload: dict) -> None:
                             "Title": f"Watchtower · {rule_id}",
                             "Priority": str(priority_map.get(severity, 3)),
                             "Tags": tag_map.get(severity, "warning"),
-                            "Click": "http://watchtower.local:8080/",
+                            "Click": "http://watchtower.local/",
                         },
                     )
                     urllib.request.urlopen(req, timeout=4)
@@ -217,7 +226,18 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
     mac = features.get("mac")
     if not mac:
         return None
-    if features.get("is_random_mac") is False:
+    authorized_identity = (features.get("decoded") or {}).get("authorized_identity") or {}
+    if authorized_identity.get("key_id"):
+        return f"ble:irk:{authorized_identity['key_id']}"
+    tracker = (features.get("decoded") or {}).get("location_tracker") or {}
+    if tracker.get("alert_eligible"):
+        family = tracker.get("family") or "unknown"
+        return f"ble:tracker:{family}"
+    # AddressType comes directly from BlueZ and is the only reliable way to
+    # distinguish public BLE addresses from rotating private addresses.  A
+    # public Apple device can safely keep its MAC identity.
+    address_type = str(features.get("address_type") or "").lower()
+    if address_type == "public":
         return f"ble:mac:{mac.lower()}"
     name = (features.get("local_name") or "").strip()
     if name:
@@ -232,6 +252,11 @@ def _ble_entity_id(features: dict, scanner: str, kind: str) -> str | None:
         # Group by Apple Continuity subtype. Multiple iPhones broadcasting
         # Nearby-Info will share an entity — we report population, not per-device.
         return f"ble:apple:{apple_kind}"
+    # Compatibility for historical/non-BlueZ events.  Never trust the old
+    # byte heuristic for Apple Continuity packets: their private addresses
+    # routinely look like public IEEE addresses.
+    if not address_type and features.get("is_random_mac") is False:
+        return f"ble:mac:{mac.lower()}"
     # Otherwise: random MAC with no useful identifier → background noise.
     return None
 
@@ -241,20 +266,31 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
     if scanner == "ble_scanner":
         return _ble_entity_id(ev_features, scanner, kind)
     if scanner == "subghz_scanner":
+        from watchtower.rf_identity import stable_subghz_identity
         proto = ev_features.get("protocol")
         decoded = ev_features.get("decoded") or {}
-        ident = decoded.get("id") or decoded.get("rolling_code") or decoded.get("button_id") or "unknown"
         if not proto:
             return None
+        stable = stable_subghz_identity(decoded)
+        ident = stable[1] if stable else "unknown"
         return f"subghz:{proto}:{ident}"
     if scanner == "wifi_scanner":
         mac = ev_features.get("mac")
         if not mac:
             return None
-        # WiFi probe requests use random MACs heavily — same logic as BLE.
-        if ev_features.get("is_random_mac") is False:
+        # An AP beacon's BSSID is its useful stable radio identity, including
+        # when the U/L bit is set (mesh nodes and phone hotspots commonly do
+        # this). Client probe requests rotate addresses heavily, so only that
+        # event kind falls back to the requested SSID.
+        if kind != "wifi_probe_request" or ev_features.get("is_random_mac") is False:
             return f"wifi:mac:{mac.lower()}"
-        ssid = (ev_features.get("ssid") or "").strip()
+        decoded = ev_features.get("decoded") or {}
+        ssid = str(
+            ev_features.get("ssid")
+            or ev_features.get("local_name")
+            or decoded.get("ssid")
+            or ""
+        ).strip()
         if ssid:
             return f"wifi:ssid:{ssid}"
         return None
@@ -264,6 +300,15 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
 
 def _classify_entity_kind(scanner: str, kind: str, features: dict) -> str:
     if scanner == "ble_scanner":
+        detection = (features.get("decoded") or {}).get("device_detection") or {}
+        if detection.get("device_signature") == "flipper_zero":
+            return "ble_flipper_zero"
+        tracker = (features.get("decoded") or {}).get("location_tracker") or {}
+        if tracker.get("alert_eligible"):
+            return f"ble_tracker_{tracker.get('family') or 'unknown'}"
+        continuity = (features.get("decoded") or {}).get("apple_continuity") or {}
+        if continuity.get("subtype") in {"proximity-pairing", "airpods-connected"}:
+            return "ble_headphones"
         services = features.get("service_uuids") or []
         if any(uuid in services for uuid in ("fd6f",)):
             return "ble_findmy"
@@ -340,6 +385,37 @@ class Analytics:
 
     def __init__(self, db_path: Path | str) -> None:
         self._db = Path(db_path)
+        self._name_vault = NameKeyVault(self._db)
+
+    def _apply_authorized_name_crypto(self, feats: dict[str, Any], keys) -> set[str]:
+        """Attach authenticated name/identity evidence; return used key IDs."""
+        used: set[str] = set()
+        if not isinstance(feats.get("decoded"), dict):
+            feats["decoded"] = {}
+        decoded = feats["decoded"]
+        names = decoded.setdefault("authorized_names", [])
+        mac = str(feats.get("mac") or "").lower()
+        for key in keys:
+            scope = key.scope.lower()
+            if scope not in {"*", mac, f"ble:mac:{mac}"} and not scope.startswith("ble:irk:"):
+                continue
+            if key.key_type == "ble_irk" and mac and resolve_rpa(mac, key.secret):
+                decoded["authorized_identity"] = {"key_id": key.key_id, "label": key.label}
+                names.append({"name": key.label, "source": "ble_irk_identity",
+                              "evidence": {"key_id": key.key_id, "authenticated": True}})
+                used.add(key.key_id)
+            elif key.key_type == "ble_ead":
+                for encoded in feats.get("encrypted_ad_data_hex") or []:
+                    try:
+                        plain = decrypt_ead(bytes.fromhex(encoded), key.secret[:16], key.secret[16:])
+                        name = local_name_from_ad(plain)
+                    except (ValueError, TypeError):
+                        continue
+                    if name:
+                        names.append({"name": name, "source": "ble_ead_local_name",
+                                      "evidence": {"key_id": key.key_id, "authenticated": True}})
+                        used.add(key.key_id)
+        return used
 
     def _get_state(self, conn, key: str, default: str) -> str:
         row = conn.execute("SELECT value FROM analytics_state WHERE key = ?", (key,)).fetchone()
@@ -354,6 +430,12 @@ class Analytics:
 
     def step(self) -> dict[str, Any]:
         """Run one roll-up pass. Returns summary stats."""
+        try:
+            authorized_keys = self._name_vault.enabled()
+        except Exception:  # noqa: BLE001
+            log.exception("name_crypto: unable to load authorized keys")
+            authorized_keys = []
+        used_keys: set[str] = set()
         with get_connection(self._db) as conn:
             last_id = self._get_state(conn, "rollup_last_event_id", "")
             cutoff_unix = int(time.time()) - 7 * 86400  # only last 7d
@@ -372,14 +454,24 @@ class Analytics:
             # Aggregate: entity_id -> stats. Also collect per-scanner per-hour-of-week feature values.
             entity_seen: dict[str, dict[str, Any]] = defaultdict(lambda: {
                 "scanner": "", "kind": "", "first": None, "last": None, "obs": 0,
-                "rssis": [], "is_random_mac": None, "vendor": None, "name": None,
+                "rssis": [], "is_random_mac": None, "vendor": None,
+                "name_candidates": {},
                 "obs_log": [],   # list of (ts_unix, rssi) for visit segmentation
             })
             scanner_hour_counts: dict[tuple[str, int], int] = defaultdict(int)
             midband_hour_energy: dict[tuple[str, int], list[float]] = defaultdict(list)
+            legacy_random_ble_entities: set[str] = set()
 
             for event_id, ts_unix, scanner, kind, feats_json in rows:
                 feats = json.loads(feats_json) if feats_json else {}
+                if (scanner == "ble_scanner"
+                        and str(feats.get("address_type") or "").lower() == "random"
+                        and feats.get("mac")):
+                    legacy_random_ble_entities.add(
+                        f"ble:mac:{str(feats['mac']).lower()}"
+                    )
+                if scanner == "ble_scanner" and authorized_keys:
+                    used_keys.update(self._apply_authorized_name_crypto(feats, authorized_keys))
                 hw = _hour_of_week(ts_unix)
                 scanner_hour_counts[(scanner, hw)] += 1
 
@@ -401,6 +493,7 @@ class Analytics:
                 # If this is Apple Continuity, decode and remember most recent state.
                 if scanner == "ble_scanner":
                     mfr_hex = feats.get("manufacturer_data_hex") or ""
+                    tracker_detection = (feats.get("decoded") or {}).get("location_tracker") or {}
                     if mfr_hex.lower().startswith("4c00"):
                         from watchtower.apple_continuity import decode_continuity, short_state_summary
                         decoded = decode_continuity(mfr_hex)
@@ -409,15 +502,17 @@ class Analytics:
                             summary = short_state_summary(decoded)
                             if summary:
                                 e["continuity_state"] = summary
-                    # Find-My-specific cluster tracking (across rotating MACs).
-                    if mfr_hex.lower().startswith("4c0012"):
-                        from watchtower.findmy_clusters import process_findmy_event
+                    # Cross-platform tracker clustering (including rotating MACs).
+                    if tracker_detection.get("alert_eligible"):
+                        from watchtower.findmy_clusters import process_location_tracker_event
                         from watchtower.findmy_owned import match_event as findmy_match_owned
                         try:
-                            cluster_id = process_findmy_event(conn, feats.get("mac"), mfr_hex,
-                                                              feats.get("rssi"), ts_unix)
+                            cluster_id = process_location_tracker_event(
+                                conn, feats.get("mac"), tracker_detection, feats.get("rssi"), ts_unix,
+                            )
                             # Catalog match: is this one of the user's own trackers?
-                            owned = findmy_match_owned(conn, mfr_hex, feats.get("mac"))
+                            owned = (findmy_match_owned(conn, mfr_hex, feats.get("mac"))
+                                     if tracker_detection.get("family") == "apple_findmy" else None)
                             if owned and cluster_id:
                                 # Stamp the cluster as enrolled with the user-given name.
                                 conn.execute(
@@ -426,6 +521,12 @@ class Analytics:
                                 )
                         except Exception:  # noqa: BLE001
                             log.exception("findmy: cluster processing failed")
+                elif scanner == "subghz_scanner":
+                    from watchtower.rf_identity import subghz_summary
+                    e["identification_summary"] = subghz_summary(
+                        feats.get("protocol") or "unknown",
+                        feats.get("decoded") or {},
+                    )
                 rssi_int = None
                 rssi = feats.get("rssi")
                 if rssi is not None:
@@ -437,22 +538,81 @@ class Analytics:
                 e["obs_log"].append((ts_unix, rssi_int))
                 e["is_random_mac"] = feats.get("is_random_mac") if e["is_random_mac"] is None else e["is_random_mac"]
                 e["vendor"] = e["vendor"] or feats.get("vendor_oui")
-                e["name"] = e["name"] or feats.get("local_name")
+                for candidate_name, candidate_source, candidate_evidence in candidates_from_features(scanner, feats):
+                    e["name_candidates"][(candidate_source, candidate_name)] = (
+                        candidate_evidence, ts_unix
+                    )
+
+            # Retire any MAC entity made by an older scanner as soon as BlueZ
+            # authoritatively reports that same address as random.  This makes
+            # the recap self-healing without deleting observations or waiting
+            # for another reboot/migration pass.
+            if legacy_random_ble_entities:
+                conn.executemany(
+                    """UPDATE entities
+                       SET is_random_mac = 1,
+                           notes_inferred = COALESCE(
+                               notes_inferred, 'Legacy rotating BLE privacy address')
+                       WHERE entity_id = ?""",
+                    [(eid,) for eid in legacy_random_ble_entities],
+                )
 
             # Upsert entities.
             now = int(time.time())
+            conn.execute(
+                "DELETE FROM entity_candidates WHERE last_seen_unix < ?",
+                (now - 86400,),
+            )
+            unconfirmed_entities: set[str] = set()
             for eid, e in entity_seen.items():
+                if e["scanner"] == "subghz_scanner":
+                    existing = conn.execute(
+                        "SELECT 1 FROM entities WHERE entity_id = ?", (eid,),
+                    ).fetchone()
+                    if not existing:
+                        conn.execute(
+                            """INSERT INTO entity_candidates
+                                   (entity_id, scanner, kind, first_seen_unix,
+                                    last_seen_unix, observation_count)
+                               VALUES (?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(entity_id) DO UPDATE SET
+                                   first_seen_unix = MIN(
+                                       entity_candidates.first_seen_unix,
+                                       excluded.first_seen_unix),
+                                   last_seen_unix = MAX(
+                                       entity_candidates.last_seen_unix,
+                                       excluded.last_seen_unix),
+                                   observation_count =
+                                       entity_candidates.observation_count +
+                                       excluded.observation_count""",
+                            (eid, e["scanner"], e["kind"], e["first"],
+                             e["last"], e["obs"]),
+                        )
+                        candidate = conn.execute(
+                            """SELECT first_seen_unix, last_seen_unix,
+                                      observation_count
+                               FROM entity_candidates WHERE entity_id = ?""",
+                            (eid,),
+                        ).fetchone()
+                        if not candidate or candidate[2] < 2:
+                            unconfirmed_entities.add(eid)
+                            continue
+                        e["first"], e["last"], e["obs"] = candidate
+                        conn.execute(
+                            "DELETE FROM entity_candidates WHERE entity_id = ?",
+                            (eid,),
+                        )
                 rssis = e["rssis"]
                 avg = sum(rssis) / len(rssis) if rssis else None
                 lo = min(rssis) if rssis else None
                 hi = max(rssis) if rssis else None
-                continuity_state = e.get("continuity_state")
+                continuity_state = e.get("continuity_state") or e.get("identification_summary")
                 conn.execute("""
                     INSERT INTO entities (
                         entity_id, scanner, kind, first_seen_unix, last_seen_unix,
                         visit_count, total_observations, is_random_mac, avg_rssi, min_rssi, max_rssi,
-                        vendor, friendly_name, notes_inferred
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                        vendor, notes_inferred
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(entity_id) DO UPDATE SET
                         scanner = excluded.scanner,
                         kind = excluded.kind,
@@ -465,11 +625,18 @@ class Analytics:
                         min_rssi = MIN(COALESCE(entities.min_rssi, excluded.min_rssi), COALESCE(excluded.min_rssi, entities.min_rssi)),
                         max_rssi = MAX(COALESCE(entities.max_rssi, excluded.max_rssi), COALESCE(excluded.max_rssi, entities.max_rssi)),
                         vendor = COALESCE(entities.vendor, excluded.vendor),
-                        friendly_name = COALESCE(entities.friendly_name, excluded.friendly_name),
                         notes_inferred = COALESCE(excluded.notes_inferred, entities.notes_inferred)
                 """, (eid, e["scanner"], e["kind"], e["first"], e["last"],
                       e["obs"], 1 if e["is_random_mac"] else 0 if e["is_random_mac"] is False else None,
-                      avg, lo, hi, e["vendor"], e["name"], continuity_state))
+                      avg, lo, hi, e["vendor"], continuity_state))
+                for (candidate_source, candidate_name), (evidence, observed_unix) in e["name_candidates"].items():
+                    record_name_candidate(
+                        conn, eid, candidate_name, candidate_source,
+                        evidence=evidence, observed_unix=observed_unix,
+                    )
+
+            for eid in unconfirmed_entities:
+                entity_seen.pop(eid, None)
 
             # Update baseline_stats with Welford for scanner counts (per hour-of-week).
             for (scanner, hw), cnt in scanner_hour_counts.items():
@@ -595,6 +762,11 @@ class Analytics:
             # Update watermark.
             last_seen_id = rows[-1][0]
             self._set_state(conn, "rollup_last_event_id", last_seen_id)
+            if used_keys:
+                conn.executemany(
+                    "UPDATE name_decryption_keys SET last_used_unix=? WHERE key_id=?",
+                    [(now, key_id) for key_id in used_keys],
+                )
 
             return {
                 "processed": len(rows),
@@ -875,10 +1047,19 @@ class Analytics:
             is_after_hours = hour_utc >= after_start or hour_utc < after_end
 
         def _fire(rule_id, severity, entity_id, score, evidence):
-            existing = conn.execute(
-                "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id IS ? AND ts_unix > ? LIMIT 1",
-                (rule_id, entity_id, recent_threshold),
-            ).fetchone()
+            cluster_id = evidence.get("cluster_id") if isinstance(evidence, dict) else None
+            if cluster_id:
+                existing = conn.execute(
+                    """SELECT 1 FROM alerts
+                       WHERE rule_id = ? AND ts_unix > ?
+                         AND json_extract(evidence_json, '$.cluster_id') = ? LIMIT 1""",
+                    (rule_id, recent_threshold, cluster_id),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT 1 FROM alerts WHERE rule_id = ? AND entity_id IS ? AND ts_unix > ? LIMIT 1",
+                    (rule_id, entity_id, recent_threshold),
+                ).fetchone()
             if existing:
                 return
             alert_id = str(ULID())
@@ -894,6 +1075,33 @@ class Analytics:
                 "severity": severity, "entity_id": entity_id, "score": score,
                 "home_state": home_state, "evidence": evidence,
             })
+
+        # ---- Flipper Zero BLE signature ----
+        # Alert only on the official name + official serial-service pair. A
+        # name-only or UUID-only match remains visible as medium-confidence
+        # metadata but is deliberately too weak to page the user.
+        if S.get("rule_flipper_zero_detected", True):
+            flippers = conn.execute(
+                """SELECT json_extract(features_json, '$.local_name') AS local_name,
+                          MAX(CAST(json_extract(features_json, '$.rssi') AS INTEGER)) AS rssi
+                   FROM raw_events
+                   WHERE scanner = 'ble_scanner'
+                     AND ts_unix > ?
+                     AND json_extract(features_json, '$.decoded.device_detection.device_signature') = 'flipper_zero'
+                     AND json_extract(features_json, '$.decoded.device_detection.alert_eligible') = 1
+                   GROUP BY local_name""",
+                (recent_threshold,),
+            ).fetchall()
+            for local_name, rssi in flippers:
+                entity_id = f"ble:named:{local_name}" if local_name else None
+                _fire("flipper_zero_detected", "high", entity_id, 0.9, {
+                    "device": "Flipper Zero",
+                    "confidence": "high",
+                    "local_name": local_name,
+                    "rssi": rssi,
+                    "evidence": "official BLE name format and serial-service UUID",
+                    "limitation": "BLE identifies a nearby compatible advertisement; it does not prove who operated it or attribute sub-GHz traffic.",
+                })
 
         # ---- Rule 1: anchor_absent_unknown_linger ----
         # Only meaningful if we know who's home — i.e., at least one anchor enrolled.
@@ -934,33 +1142,42 @@ class Analytics:
                 _fire(rule, "high" if home_state == "away" else "medium",
                       entity_id, 0.8, {"home_state": home_state})
 
-        # ---- Rule 3: AirTag / Find-My broadcast ----
-        # Continuous Find-My presence near the property is worth flagging.
+        # ---- Rule 3: protocol-confirmed location tracker nearby ----
         if S["rule_airtag_findmy_present"]:
-            airtag = conn.execute(
-                """SELECT e.entity_id, e.last_seen_unix, e.avg_rssi
-                   FROM entities e
-                   WHERE e.entity_id IN ('ble:apple:Find-My', 'ble:apple:find-my')
-                     AND e.last_seen_unix > ?
-                     AND e.classification IS NULL""",
+            trackers = conn.execute(
+                """SELECT cluster_id, tracker_family, network_provider, first_seen_unix,
+                          last_seen_unix, sighting_count, avg_rssi, last_status, near_owner
+                   FROM findmy_clusters
+                   WHERE last_seen_unix > ? AND classification IS NULL""",
                 (now - 600,),
-            ).fetchone()
-            if airtag:
-                entity_id, last_seen, avg_rssi = airtag
-                # Only fire when the Find-My broadcast is *close* — Apple devices
-                # in range from a neighbor's apartment etc. are noise. Require
-                # avg_rssi > -65 dBm (~10-15m through walls) to alert.
-                if avg_rssi is not None and avg_rssi > -65:
-                    severity = "high" if home_state == "away" else "medium"
-                    _fire("airtag_findmy_present", severity, entity_id, 0.7, {
-                        "avg_rssi": avg_rssi,
-                        "home_state": home_state,
-                        "explanation": (
-                            "Apple Find-My (AirTag / lost AirPods / Find-My-enabled device) "
-                            "broadcasting strongly close to the Pi (RSSI > -65 dBm). "
-                            "If this is yours, mark it as known."
-                        ),
-                    })
+            ).fetchall()
+            from watchtower.location_trackers import tracker_risk
+            for (cluster_id, family, provider, first_seen, last_seen, sightings,
+                 avg_rssi, status, near_owner) in trackers:
+                if near_owner == 1 or avg_rssi is None or avg_rssi <= -65:
+                    continue
+                separated = near_owner == 0 or status in {"separated", "lost-mode", "unowned"}
+                severity, risk = tracker_risk(
+                    {"separated": separated}, avg_rssi=avg_rssi,
+                    age_sec=max(0, last_seen - first_seen), sightings=sightings,
+                )
+                if home_state == "away" and severity == "medium":
+                    severity = "high"
+                _fire("airtag_findmy_present", severity, f"ble:tracker:{family}", risk, {
+                    "cluster_id": cluster_id,
+                    "tracker_family": family,
+                    "network_provider": provider,
+                    "status": status,
+                    "avg_rssi": round(avg_rssi, 1),
+                    "sightings": sightings,
+                    "observed_for_sec": max(0, last_seen - first_seen),
+                    "home_state": home_state,
+                    "explanation": (
+                        "A protocol-confirmed location tracker is strongly in range. "
+                        "Separated state raises concern, but a fixed sensor cannot by itself "
+                        "prove that the device is following a person."
+                    ),
+                })
 
         # ---- Rule 4: first-time visitor at after-hours ----
         # Skip if no anchors are enrolled (we can't reason about who "should" be here).
@@ -1012,70 +1229,91 @@ class Analytics:
                                "with recurring presence. If this is yours, enroll it on the Discover tab.",
             })
 
-        # ---- Rule 7: persistent Find-My tracker (anti-AirTag stalking) ----
-        # Apple Find-My beacon keys rotate every ~15 min so we can't track a
-        # specific AirTag long-term. But we can ask: has *any* Find-My
-        # broadcast been near the Pi for many minutes per day across multiple
-        # consecutive days? If yes, that's strong evidence of a stationary or
-        # following tracker (someone's planted an AirTag on the user's car or
-        # bag, or the user has their own — either way, surface it).
+        # ---- Rule 7: persistent individual tracker cluster ----
         if S.get("rule_findmy_persistent_tracker", True):
             min_min = int(S.get("findmy_persistent_min_minutes_per_day", 180))
             min_days = int(S.get("findmy_persistent_min_consecutive_days", 3))
-            # Count distinct minutes-with-Find-My-events per day for last 7 days.
             rows = conn.execute("""
                 WITH minute_buckets AS (
-                    SELECT date(ts_unix, 'unixepoch', 'localtime') AS day,
-                           CAST(ts_unix / 60 AS INTEGER) AS minute_bucket
-                    FROM raw_events
-                    WHERE scanner = 'ble_scanner'
-                      AND ts_unix > strftime('%s','now') - 7 * 86400
-                      AND substr(json_extract(features_json, '$.manufacturer_data_hex'), 1, 6) = '4c0012'
-                    GROUP BY day, minute_bucket
+                    SELECT m.cluster_id,
+                           date(r.ts_unix, 'unixepoch', 'localtime') AS day,
+                           CAST(r.ts_unix / 60 AS INTEGER) AS minute_bucket
+                    FROM raw_events r
+                    JOIN findmy_cluster_macs m
+                      ON lower(json_extract(r.features_json, '$.mac')) = m.rotating_mac
+                    JOIN findmy_clusters c ON c.cluster_id = m.cluster_id
+                    WHERE r.scanner = 'ble_scanner'
+                      AND r.ts_unix > strftime('%s','now') - 7 * 86400
+                      AND c.classification IS NULL
+                    GROUP BY m.cluster_id, day, minute_bucket
                 )
-                SELECT day, COUNT(*) AS minutes_with_findmy
+                SELECT cluster_id, day, COUNT(*) AS minutes_with_tracker
                 FROM minute_buckets
-                GROUP BY day
-                ORDER BY day DESC
+                GROUP BY cluster_id, day
+                ORDER BY cluster_id, day DESC
             """).fetchall()
-            # Walk back: how many consecutive recent days had >= min_min minutes of Find-My?
-            consecutive = 0
-            for day, minutes in rows:
-                if minutes >= min_min:
-                    consecutive += 1
-                else:
-                    break
-            if consecutive >= min_days:
-                _fire("findmy_persistent_tracker", "high", None, 0.8, {
-                    "consecutive_days": consecutive,
-                    "min_minutes_per_day": min_min,
-                    "recent_days": [{"day": d, "minutes_with_findmy": m} for d, m in rows[:7]],
-                    "explanation": (
-                        f"Apple Find-My beacons (AirTag, lost-AirPods, etc.) have been "
-                        f"in range >= {min_min} min/day for {consecutive} consecutive days. "
-                        f"This means a tracker is persistently near the property. If it's "
-                        f"yours (your wallet/keys/bag), enroll it. If not, someone may have "
-                        f"planted an AirTag on your car or belongings to track you."
-                    ),
-                })
+            by_cluster: dict[str, list[tuple[str, int]]] = defaultdict(list)
+            for cluster_id, day, minutes in rows:
+                by_cluster[cluster_id].append((day, minutes))
+            import datetime
+            today = datetime.date.today()
+            for cluster_id, days in by_cluster.items():
+                by_day = dict(days)
+                consecutive = 0
+                recent_days = []
+                for offset in range(7):
+                    day = (today - datetime.timedelta(days=offset)).isoformat()
+                    minutes = int(by_day.get(day, 0))
+                    recent_days.append({"day": day, "minutes_with_tracker": minutes})
+                    if minutes >= min_min:
+                        consecutive += 1
+                    else:
+                        break
+                if consecutive >= min_days:
+                    meta = conn.execute(
+                        "SELECT tracker_family, network_provider, last_status FROM findmy_clusters WHERE cluster_id = ?",
+                        (cluster_id,),
+                    ).fetchone() or ("unknown", None, None)
+                    _fire("findmy_persistent_tracker", "high", f"ble:tracker:{meta[0]}", 0.85, {
+                        "cluster_id": cluster_id,
+                        "tracker_family": meta[0],
+                        "network_provider": meta[1],
+                        "status": meta[2],
+                        "consecutive_days": consecutive,
+                        "min_minutes_per_day": min_min,
+                        "recent_days": recent_days,
+                        "explanation": (
+                            f"One location-tracker cluster has been in range at least {min_min} "
+                            f"minutes/day for {consecutive} consecutive days. Inspect vehicles "
+                            "and belongings and compare with the phone's unwanted-tracker alert."
+                        ),
+                    })
 
-        # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
+        # ---- Rule 6: newly arrived randomized-BSSID Wi-Fi hotspot ----
         if not S["rule_rogue_hotspot"]:
             return
         rogue_wifi = conn.execute(
-            """SELECT entity_id, avg_rssi, friendly_name
+            """SELECT entity_id, avg_rssi, friendly_name, first_seen_unix,
+                      total_observations
                FROM entities
                WHERE entity_id LIKE 'wifi:mac:%'
                  AND is_random_mac = 1
-                 AND avg_rssi IS NOT NULL AND avg_rssi > -65
-                 AND last_seen_unix > ?
+                 AND avg_rssi IS NOT NULL AND avg_rssi > -55
+                 AND first_seen_unix > ? AND last_seen_unix > ?
+                 AND total_observations >= 2
+                 AND lower(COALESCE(friendly_name,'')) != 'watchtower'
                  AND classification IS NULL""",
-            (now - 300,),
+            (now - 300, now - 300),
         ).fetchall()
-        for entity_id, avg_rssi, name in rogue_wifi:
-            _fire("rogue_hotspot", "medium", entity_id, 0.5, {
+        for entity_id, avg_rssi, name, first_seen, observations in rogue_wifi:
+            _fire("rogue_hotspot", "medium", entity_id, 0.55, {
                 "avg_rssi": avg_rssi,
                 "ssid": name,
-                "explanation": "A random-BSSID Wi-Fi AP with strong signal — looks like a phone hotspot "
-                               "or rogue AP very close to the property.",
+                "first_seen_unix": first_seen,
+                "observation_count": observations,
+                "limitation": "A randomized BSSID can be a benign phone hotspot or locally administered AP.",
+                "explanation": (
+                    "A named randomized-BSSID Wi-Fi AP appeared for the first time, "
+                    "repeated, and has a very strong nearby signal."
+                ),
             })

@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Apply one validated Watchtower Wi-Fi request as root via NetworkManager."""
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import subprocess
+import tempfile
+from pathlib import Path
+from uuid import UUID, uuid4
+
+
+RUNTIME = Path("/run/watchtower-wifi")
+REQUEST = RUNTIME / "request.json"
+ACTIVE = RUNTIME / "active.json"
+RESULTS = RUNTIME / "results"
+PROFILES = Path("/etc/NetworkManager/system-connections")
+INTERFACE = "wlan0"
+FALLBACK_AP_NAME = "Watchtower Setup"
+
+
+def run(*args: str, timeout: int = 35) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
+
+
+def valid_text(value: object, *, maximum_bytes: int) -> str:
+    text = str(value or "").strip()
+    if not text or len(text.encode("utf-8")) > maximum_bytes or any(ord(c) < 32 for c in text):
+        raise ValueError("invalid text field")
+    return text
+
+
+def keyfile_escape(value: str) -> str:
+    """Escape a GLib keyfile string without exposing it to a shell command."""
+    escaped = (value.replace("\\", "\\\\").replace("\n", "\\n")
+               .replace("\r", "\\r").replace("\t", "\\t"))
+    leading = len(escaped) - len(escaped.lstrip(" "))
+    trailing = len(escaped) - len(escaped.rstrip(" "))
+    core_end = len(escaped) - trailing if trailing else len(escaped)
+    core = escaped[leading:core_end]
+    return "\\s" * leading + core + "\\s" * trailing
+
+
+def saved_wifi_profiles() -> list[tuple[str, str]]:
+    proc = run("nmcli", "-t", "--escape", "yes", "-f", "UUID,TYPE", "connection", "show")
+    found: list[tuple[str, str]] = []
+    if proc.returncode:
+        return found
+    for line in proc.stdout.splitlines():
+        try:
+            profile_uuid, kind = line.rsplit(":", 1)
+        except ValueError:
+            continue
+        if kind not in {"wifi", "802-11-wireless"}:
+            continue
+        name = run("nmcli", "-g", "connection.id", "connection", "show", "uuid", profile_uuid, timeout=8)
+        mode = run("nmcli", "-g", "802-11-wireless.mode", "connection", "show", "uuid", profile_uuid, timeout=8)
+        if name.stdout.strip() == FALLBACK_AP_NAME or mode.stdout.strip() == "ap":
+            continue
+        ssid = run("nmcli", "-g", "802-11-wireless.ssid", "connection", "show", "uuid", profile_uuid, timeout=8)
+        if ssid.returncode == 0:
+            found.append((profile_uuid, ssid.stdout.strip()))
+    return found
+
+
+def restore_fallback_ap() -> None:
+    """Restore setup reachability after rejected credentials."""
+    run("nmcli", "--wait", "20", "connection", "up", "id", FALLBACK_AP_NAME,
+        "ifname", INTERFACE, timeout=25)
+
+
+def connect(request: dict) -> dict:
+    ssid = valid_text(request.get("ssid"), maximum_bytes=32)
+    security = str(request.get("security") or "wpa2").lower()
+    password = str(request.get("password") or "")
+    if security not in {"open", "wpa2", "wpa3"}:
+        raise ValueError("unsupported security type")
+    if security != "open" and (not 8 <= len(password) <= 63 or any(ord(c) < 32 for c in password)):
+        raise ValueError("invalid Wi-Fi password")
+
+    profile_uuid = str(uuid4())
+    profile_path = PROFILES / f"watchtower-{profile_uuid}.nmconnection"
+    profile_name = f"Watchtower - {ssid}"
+    lines = [
+        "[connection]",
+        f"id={keyfile_escape(profile_name)}",
+        f"uuid={profile_uuid}",
+        "type=wifi",
+        f"interface-name={INTERFACE}",
+        "autoconnect=true",
+        "autoconnect-priority=100",
+        "",
+        "[wifi]",
+        "mode=infrastructure",
+        f"ssid={keyfile_escape(ssid)}",
+        "",
+    ]
+    if security != "open":
+        lines.extend([
+            "[wifi-security]",
+            f"key-mgmt={'sae' if security == 'wpa3' else 'wpa-psk'}",
+            f"psk={keyfile_escape(password)}",
+        ])
+        if security == "wpa3":
+            lines.append("pmf=2")
+        lines.append("")
+    lines.extend(["[ipv4]", "method=auto", "", "[ipv6]", "method=auto", ""])
+
+    PROFILES.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".watchtower-", dir=PROFILES)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write("\n".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, profile_path)
+        os.chmod(profile_path, 0o600)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+    run("nmcli", "connection", "reload", timeout=12)
+    activated = run("nmcli", "--wait", "30", "connection", "up", "uuid", profile_uuid, "ifname", INTERFACE, timeout=35)
+    if activated.returncode:
+        run("nmcli", "connection", "delete", "uuid", profile_uuid, timeout=12)
+        profile_path.unlink(missing_ok=True)
+        restore_fallback_ap()
+        message = (activated.stderr or activated.stdout or "connection failed").strip()
+        raise RuntimeError(message[:240])
+
+    # Remove older duplicate profiles only after the new one is live.
+    for old_uuid, old_ssid in saved_wifi_profiles():
+        if old_ssid == ssid and old_uuid != profile_uuid:
+            run("nmcli", "connection", "delete", "uuid", old_uuid, timeout=12)
+    return {"ssid": ssid, "connection_uuid": profile_uuid}
+
+
+def forget(request: dict) -> dict:
+    profile_uuid = str(UUID(str(request.get("uuid") or "")))
+    known = {item[0]: item[1] for item in saved_wifi_profiles()}
+    if profile_uuid not in known:
+        raise ValueError("saved Wi-Fi profile not found")
+    proc = run("nmcli", "connection", "delete", "uuid", profile_uuid, timeout=15)
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or proc.stdout or "delete failed").strip()[:240])
+    return {"ssid": known[profile_uuid], "connection_uuid": profile_uuid}
+
+
+def write_result(request_id: str, result: dict) -> None:
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    target = RESULTS / f"{request_id}.json"
+    temp = RESULTS / f".{request_id}.tmp"
+    temp.write_text(json.dumps(result), encoding="utf-8")
+    admin = pwd.getpwnam("admin")
+    os.chown(temp, admin.pw_uid, admin.pw_gid)
+    os.chmod(temp, 0o600)
+    os.replace(temp, target)
+
+
+def main() -> int:
+    if not REQUEST.exists():
+        return 0
+    request: dict = {}
+    request_id = str(uuid4())
+    try:
+        # Claim the request atomically. The API treats active.json as a lock,
+        # preventing a second request from being lost if this one fails.
+        os.replace(REQUEST, ACTIVE)
+        request = json.loads(ACTIVE.read_text(encoding="utf-8"))
+        request_id = str(UUID(str(request.get("request_id") or "")))
+        action = request.get("action")
+        if action == "connect":
+            details = connect(request)
+        elif action == "forget":
+            details = forget(request)
+        else:
+            raise ValueError("unsupported action")
+        write_result(request_id, {"request_id": request_id, "ok": True, **details})
+        return 0
+    except Exception as exc:
+        write_result(request_id, {
+            "request_id": request_id,
+            "ok": False,
+            "error": str(exc)[:240],
+        })
+        # A rejected credential/profile is an expected, fully handled request;
+        # report it through the result JSON without leaving systemd failed.
+        return 0
+    finally:
+        ACTIVE.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -422,3 +422,12 @@ class MidbandScanner(Scanner):
                     sdr.close()
                 except Exception:  # noqa: BLE001
                     log.debug("midband: sdr.close raised, ignoring")
+            finally:
+                # Cancellation bypasses both the Exception handler and the
+                # normal-completion branch. Closing here releases a pending
+                # librtlsdr synchronous read so asyncio's executor cannot hold
+                # systemd shutdown open indefinitely.
+                try:
+                    sdr.close()
+                except Exception:  # noqa: BLE001
+                    log.debug("midband: final sdr.close raised, ignoring")

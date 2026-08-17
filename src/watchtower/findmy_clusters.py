@@ -1,4 +1,4 @@
-"""Find-My cluster tracker + co-presence inference.
+"""Location-tracker cluster tracking + sensor co-presence correlation.
 
 Apple rotates the BLE address of Find-My beacons every ~15 minutes, so we
 can't follow a single tracker for hours by exact MAC. This module gives
@@ -26,14 +26,10 @@ Limitations:
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
-from pathlib import Path
 
 from ulid import ULID
-
-from watchtower.storage.db import get_connection
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +57,9 @@ def _now() -> int:
 
 
 def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
-                   ts_unix: int) -> str:
+                   ts_unix: int, *, tracker_family: str = "apple_findmy",
+                   network_provider: str | None = None,
+                   near_owner: bool | None = None) -> str:
     """Find or create a cluster for this Find-My event.
 
     Heuristic: an existing cluster matches if (a) we've seen this exact
@@ -74,8 +72,10 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
 
     # 1. Direct hit on rotating_mac.
     row = conn.execute(
-        "SELECT cluster_id FROM findmy_cluster_macs WHERE rotating_mac = ?",
-        (mac,),
+        """SELECT m.cluster_id FROM findmy_cluster_macs m
+           JOIN findmy_clusters c ON c.cluster_id = m.cluster_id
+           WHERE m.rotating_mac = ? AND c.tracker_family = ?""",
+        (mac, tracker_family),
     ).fetchone()
     if row:
         cluster_id = row[0]
@@ -84,7 +84,8 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
             "WHERE rotating_mac = ?",
             (ts_unix, mac),
         )
-        _bump_cluster(conn, cluster_id, mac, rssi, status, ts_unix, new_rotation=False)
+        _bump_cluster(conn, cluster_id, mac, rssi, status, ts_unix, new_rotation=False,
+                      network_provider=network_provider, near_owner=near_owner)
         return cluster_id
 
     # 2. RSSI-continuity rotation. Find an active cluster whose last RSSI
@@ -94,11 +95,14 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
             """SELECT cluster_id, last_rssi
                FROM findmy_clusters
                WHERE last_seen_unix > ?
+                 AND tracker_family = ?
+                 AND COALESCE(network_provider, '') = COALESCE(?, '')
                  AND last_rssi IS NOT NULL
                  AND ABS(last_rssi - ?) <= ?
                ORDER BY ABS(last_rssi - ?) ASC
                LIMIT 1""",
-            (ts_unix - ROTATION_GAP_MAX_SEC, rssi, RSSI_TOLERANCE_DBM, rssi),
+            (ts_unix - ROTATION_GAP_MAX_SEC, tracker_family, network_provider,
+             rssi, RSSI_TOLERANCE_DBM, rssi),
         ).fetchone()
         if cand:
             cluster_id = cand[0]
@@ -108,7 +112,8 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
                    VALUES (?, ?, ?, ?, 1)""",
                 (mac, cluster_id, ts_unix, ts_unix),
             )
-            _bump_cluster(conn, cluster_id, mac, rssi, status, ts_unix, new_rotation=True)
+            _bump_cluster(conn, cluster_id, mac, rssi, status, ts_unix, new_rotation=True,
+                          network_provider=network_provider, near_owner=near_owner)
             return cluster_id
 
     # 3. New cluster.
@@ -116,10 +121,12 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
     conn.execute(
         """INSERT INTO findmy_clusters
             (cluster_id, first_seen_unix, last_seen_unix, sighting_count, rotation_count,
-             last_rssi, avg_rssi, last_status, last_mac)
-           VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?)""",
+             last_rssi, avg_rssi, last_status, last_mac,
+             tracker_family, network_provider, near_owner)
+           VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)""",
         (cluster_id, ts_unix, ts_unix, rssi, float(rssi) if rssi is not None else None,
-         status, mac),
+         status, mac, tracker_family, network_provider,
+         int(near_owner) if near_owner is not None else None),
     )
     conn.execute(
         """INSERT INTO findmy_cluster_macs (rotating_mac, cluster_id,
@@ -131,7 +138,9 @@ def assign_cluster(conn, mac: str, rssi: int | None, status: str | None,
 
 
 def _bump_cluster(conn, cluster_id: str, mac: str, rssi: int | None,
-                  status: str | None, ts_unix: int, new_rotation: bool) -> None:
+                  status: str | None, ts_unix: int, new_rotation: bool,
+                  network_provider: str | None = None,
+                  near_owner: bool | None = None) -> None:
     """Roll the running stats forward for an existing cluster."""
     delta_rotations = 1 if new_rotation else 0
     if rssi is not None:
@@ -144,9 +153,13 @@ def _bump_cluster(conn, cluster_id: str, mac: str, rssi: int | None,
                 last_rssi = ?,
                 avg_rssi = COALESCE(avg_rssi * 0.9 + ? * 0.1, ?),
                 last_status = COALESCE(?, last_status),
+                network_provider = COALESCE(?, network_provider),
+                near_owner = COALESCE(?, near_owner),
                 last_mac = ?
                WHERE cluster_id = ?""",
-            (ts_unix, delta_rotations, rssi, float(rssi), float(rssi), status, mac, cluster_id),
+            (ts_unix, delta_rotations, rssi, float(rssi), float(rssi), status,
+             network_provider, int(near_owner) if near_owner is not None else None,
+             mac, cluster_id),
         )
     else:
         conn.execute(
@@ -155,9 +168,12 @@ def _bump_cluster(conn, cluster_id: str, mac: str, rssi: int | None,
                 sighting_count = sighting_count + 1,
                 rotation_count = rotation_count + ?,
                 last_status = COALESCE(?, last_status),
+                network_provider = COALESCE(?, network_provider),
+                near_owner = COALESCE(?, near_owner),
                 last_mac = ?
                WHERE cluster_id = ?""",
-            (ts_unix, delta_rotations, status, mac, cluster_id),
+            (ts_unix, delta_rotations, status, network_provider,
+             int(near_owner) if near_owner is not None else None, mac, cluster_id),
         )
 
 
@@ -178,6 +194,20 @@ def process_findmy_event(conn, mac: str | None, mfr_hex: str | None,
     except (ValueError, IndexError):
         pass
     return assign_cluster(conn, mac, rssi, status, ts_unix)
+
+
+def process_location_tracker_event(conn, mac: str | None, detection: dict | None,
+                                   rssi: int | None, ts_unix: int) -> str | None:
+    """Cluster any protocol-backed Apple, Tile, or DULT tracker sighting."""
+    if not mac or not detection or not detection.get("alert_eligible"):
+        return None
+    family = str(detection.get("family") or "unknown")
+    return assign_cluster(
+        conn, mac, rssi, detection.get("status"), ts_unix,
+        tracker_family=family,
+        network_provider=detection.get("provider"),
+        near_owner=detection.get("near_owner"),
+    )
 
 
 def prune_old_clusters(conn) -> int:
@@ -292,7 +322,6 @@ def _anchor_macs(conn, entity_id: str) -> list[str]:
         ).fetchall()
         return [r[0] for r in rows if r[0]]
     if entity_id.startswith("ble:apple:"):
-        kind = entity_id[len("ble:apple:"):]
         rows = conn.execute(
             """SELECT DISTINCT lower(json_extract(features_json, '$.mac'))
                FROM raw_events

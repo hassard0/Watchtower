@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from watchtower.events import Event, EventKind, Features, Scanner as ScannerName
+from watchtower.rf_identity import subghz_identification_metadata
 from watchtower.scanners.base import Scanner
 
 log = logging.getLogger(__name__)
@@ -48,10 +49,12 @@ def _line_to_event(line: str) -> Event | None:
     freq_hz = int(round(freq_mhz * 1_000_000)) if isinstance(freq_mhz, (int, float)) else None
     kind = _classify_kind(model)
     decoded = {k: v for k, v in d.items() if k not in ("time", "freq", "model")}
+    decoded["_watchtower"] = subghz_identification_metadata(decoded)
     feats = Features(
         protocol=model,
         frequency_hz=freq_hz,
         decoded=decoded,
+        local_name=model,
     )
     return Event(scanner=ScannerName.SUBGHZ, kind=kind, features=feats, raw=d)
 
@@ -69,12 +72,17 @@ class SubGhzScanner(Scanner):
         # -M time:utc:usec emits a status event every received packet so a
         # totally-quiet RF environment is distinguishable from a broken tuner.
         # -v gives one extra diagnostic line per minute.
-        self._args = rtl_433_args or [
+        self._args = list(rtl_433_args or [
             "-F", "json",
             "-d", str(device_index),
             "-M", "stats:1:60",  # JSON stats record every 60s
             "-M", "level",       # include signal level in records
-        ]
+        ])
+        # Decoder numbers remain stable even when a human-readable model label
+        # changes between rtl_433 releases, making historical fingerprints
+        # easier to correlate. Supported by rtl_433 25.02+.
+        if "protocol" not in self._args:
+            self._args.extend(["-M", "protocol"])
 
     async def run(self) -> None:
         cmd = ["rtl_433", *self._args]

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from watchtower.scanners.wifi import WifiScanner, _adapter_present
+from watchtower.scanners.wifi import WifiScanner, _adapter_present, _parse_iw_scan
 
 
 def test_adapter_present_returns_false_for_missing_iface(tmp_path: Path):
@@ -27,3 +27,30 @@ async def test_wifi_scanner_runs_in_stub_mode_when_iface_missing():
     except asyncio.CancelledError:
         pass
     assert received == []  # stub mode emits nothing
+
+
+def test_iw_scan_extracts_wpa3_and_public_wps_identity_metadata():
+    output = """
+BSS 02:11:22:33:44:55(on wlan0)
+        freq: 5180
+        signal: -42.00 dBm
+        SSID: Workshop
+        RSN:
+                * Authentication suites: PSK SAE
+        WPS:
+                * Manufacturer: Example Networks
+                * Model: Router 9000
+                * Device name: Workshop AP
+"""
+    result = _parse_iw_scan(output)
+    assert result == [{
+        "bssid": "02:11:22:33:44:55",
+        "ssid": "Workshop",
+        "channel": None,
+        "signal": -42.0,
+        "freq": 5180,
+        "encryption": "WPA3-SAE",
+        "manufacturer": "Example Networks",
+        "model": "Router 9000",
+        "device_name": "Workshop AP",
+    }]

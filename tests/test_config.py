@@ -20,6 +20,10 @@ queue_size = 5000
 level = "DEBUG"
 format = "json"
 
+[api]
+host = "127.0.0.1"
+port = 8088
+
 [scanners.ble]
 enabled = false
 adapter = "hci1"
@@ -48,6 +52,8 @@ sample_rate_hz = 2048000
     assert cfg.storage.retention_days == 14
     assert cfg.bus.queue_size == 5000
     assert cfg.logging.level == "DEBUG"
+    assert cfg.api.host == "127.0.0.1"
+    assert cfg.api.port == 8088
     assert cfg.scanners.ble.enabled is False
     assert cfg.scanners.ble.adapter == "hci1"
     assert cfg.scanners.wifi.interface == "wlan2"
@@ -60,9 +66,17 @@ def test_missing_section_uses_defaults(tmp_path: Path):
     p.write_text("[storage]\ndb_path='/tmp/x.db'\n", encoding="utf-8")
     cfg = load_config(p)
     assert cfg.storage.retention_days == 7   # default
+    assert cfg.api.port == 80                # default
     assert cfg.scanners.ble.enabled is True  # default
 
 
 def test_load_config_missing_file_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "no.toml")
+
+
+def test_deployment_example_keeps_plain_http_on_loopback():
+    example = Path(__file__).parents[1] / "config" / "watchtower.example.toml"
+    cfg = load_config(example)
+    assert cfg.api.host == "127.0.0.1"
+    assert cfg.api.port == 8080

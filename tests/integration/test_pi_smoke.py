@@ -28,6 +28,38 @@ def test_service_active(pi_host: str):
     assert out.strip() == "active"
 
 
+def test_port_80_redirects_to_https(pi_host: str):
+    out = _ssh(
+        pi_host,
+        "curl --silent --show-error --output /dev/null "
+        "--write-out '%{http_code} %{redirect_url}' "
+        "http://watchtower.local/",
+    )
+    assert out.strip() == "308 https://watchtower.local/"
+
+
+def test_https_dashboard_uses_private_ca(pi_host: str):
+    out = _ssh(
+        pi_host,
+        "curl --fail --silent --show-error --output /dev/null "
+        "--write-out '%{http_code}' "
+        "--cacert /etc/watchtower/tls/watchtower-ca.crt "
+        "--resolve watchtower.local:443:127.0.0.1 "
+        "https://watchtower.local/api/health",
+    )
+    assert out.strip() == "200"
+
+
+def test_certificate_refresh_timer_active(pi_host: str):
+    out = _ssh(pi_host, "systemctl is-active watchtower-cert-refresh.timer")
+    assert out.strip() == "active"
+
+
+def test_wifi_recovery_timer_active(pi_host: str):
+    out = _ssh(pi_host, "systemctl is-active watchtower-wifi-reconnect.timer")
+    assert out.strip() == "active"
+
+
 def test_service_logs_scanners_started(pi_host: str):
     # Fetch enough lines to capture the current invocation's start record.
     # systemd always records "Started watchtower.service" when the unit
@@ -45,7 +77,7 @@ def test_db_exists_and_has_schema(pi_host: str):
         "sqlite3 -readonly -cmd '.timeout 5000' "
         "/var/lib/watchtower/watchtower.db 'SELECT version FROM schema_meta;'",
     )
-    assert out.strip() == "3"  # schema v3 adds zones + probe_captures
+    assert out.strip() == "10"  # transient presence and multi-signal episode tables
 
 
 def _sqlite_count(host: str, scanner: str) -> int:

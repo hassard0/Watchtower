@@ -6,4 +6,3 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/watchtower-cert-refresh
-

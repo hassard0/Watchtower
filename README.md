@@ -362,6 +362,7 @@ take effect immediately without restart.
 | `rogue_hotspot` | Wi-Fi AP with locally-administered (random) BSSID and strong signal — the smell test for a phone hotspot or rogue access point near the property |
 | `honeypot_engaged` | Inbound GATT connection to the Pi's lure name |
 | `flipper_zero_detected` | Official `Flipper <device-name>` BLE format and 0x3080–0x3083 serial-service UUID appear together. Name-only matches are informational to avoid easy spoofing |
+| `multi_signal_intrusion` | At least two independent signal families occur in a five-minute episode, the context-adjusted score crosses its threshold, and one signal is decisive (key-fob/garage traffic, honeypot contact, or high-confidence Flipper detection). Multiple BLE symptoms never stack as independent evidence |
 
 Severity is one of `critical / high / medium / low` and drives the
 dashboard banner color and (when configured) the ntfy push priority.
@@ -372,7 +373,7 @@ dashboard banner color and (when configured) the ntfy push priority.
 
 | Tab | What you see |
 | --- | --- |
-| **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), live RF radar with RSSI as radial distance, top anomalies, scanner activity bars (BLE / Wi-Fi / Sub-GHz / Mid-band, all colored), baseline learning progress, "entropy of the room" envelope plot |
+| **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), explainable presence episodes and short-lived anonymous BLE flows, live RF radar with RSSI as radial distance, top anomalies, scanner activity bars, baseline learning progress, and the "entropy of the room" envelope plot |
 | **Discover** | Auto-suggested enrollment candidates ranked by stability. One-tap classify into Anchor / Satellite / Known guest / Untrusted. Active **GATT probe** button asks the device for its name in real time. |
 | **Entities** | Sortable, filterable table of every tracked entity with anomaly bars and regularity meters. Each row shows source antenna + frequency band ("BLE 2.4 GHz", "Wi-Fi 2.4 GHz", "Sub-GHz 433 MHz", "RF 915 MHz") and IEEE OUI vendor when known. |
 | **Timeline** | 1 h / 6 h / 24 h / 3 d / 7 d scrubbable visit timeline, color-coded by classification and anomaly score |
@@ -427,7 +428,7 @@ Live measurements on the reference build:
 
 ---
 
-## Schema (v5)
+## Schema (v10)
 
 SQLite at `/var/lib/watchtower/watchtower.db`. WAL mode.
 
@@ -441,6 +442,8 @@ SQLite at `/var/lib/watchtower/watchtower.db`. WAL mode.
 | `zones` / `zone_samples` / `probe_captures` | RF fingerprints from the phone calibration page | indefinite / cleared on save |
 | `findmy_clusters` / `findmy_cluster_macs` | rotating-MAC tracking + cluster identity | clusters pruned after 7 days idle |
 | `findmy_owned_trackers` / `findmy_key_catalog` | user-owned AirTag enrollment + pre-computed slot pubkeys | indefinite |
+| `presence_tracklets` / `presence_tracklet_macs` | temporary advertisement-shape continuity across BLE privacy-address handoffs; explicitly not permanent device identities | marked departed after 5 min idle; query window is bounded |
+| `intrusion_signals` / `intrusion_episodes` | auditable multi-radio behavioral evidence, family-level scores, context, and alert decisions | signals pruned after 24 h; episodes retained |
 | `analytics_state` | rollup watermark, runtime settings overrides, honeypot state | indefinite |
 
 ---

@@ -193,6 +193,7 @@ class ApiServer:
         self._app.router.add_get("/api/discovery", self.discovery)
         # Morning summary — what happened recently
         self._app.router.add_get("/api/recap", self.recap)
+        self._app.router.add_get("/api/presence", self.presence)
         # Settings
         self._app.router.add_get("/api/settings", self.settings_get)
         self._app.router.add_post("/api/settings", self.settings_set)
@@ -758,6 +759,81 @@ class ApiServer:
 
         rows = await _offload(_query)
         return web.json_response({"alerts": rows, "ts_unix": now_unix})
+
+    async def presence(self, request: web.Request) -> web.Response:
+        """Recent anonymous BLE flows and explainable intrusion episodes."""
+        now = int(time.time())
+        minutes = max(5, min(1440, int(request.query.get("minutes", "30"))))
+        since = now - minutes * 60
+        db_path = self._db
+
+        def _query():
+            with get_connection(db_path) as conn:
+                track_cursor = conn.execute(
+                    """SELECT tracklet_id,label,first_seen_unix,last_seen_unix,
+                              observation_count,address_count,first_rssi,last_rssi,
+                              avg_rssi,max_rssi,state,confidence,evidence_json
+                       FROM presence_tracklets WHERE last_seen_unix>=?
+                       ORDER BY last_seen_unix DESC LIMIT 100""",
+                    (since,),
+                )
+                track_cols = [col[0] for col in track_cursor.description]
+                tracklets = []
+                for row in track_cursor.fetchall():
+                    item = dict(zip(track_cols, row))
+                    try:
+                        item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+                    except (TypeError, ValueError):
+                        item["evidence"] = {}
+                    first_rssi = item.get("first_rssi")
+                    last_rssi = item.get("last_rssi")
+                    item["rssi_change_db"] = (
+                        last_rssi - first_rssi
+                        if first_rssi is not None and last_rssi is not None else None
+                    )
+                    item["currently_present"] = item["last_seen_unix"] >= now - 120
+                    tracklets.append(item)
+
+                episode_cursor = conn.execute(
+                    """SELECT episode_id,start_unix,last_seen_unix,status,score,
+                              severity,home_state,signal_types_json,evidence_json,alert_id
+                       FROM intrusion_episodes WHERE last_seen_unix>=?
+                       ORDER BY last_seen_unix DESC LIMIT 50""",
+                    (since,),
+                )
+                episode_cols = [col[0] for col in episode_cursor.description]
+                episodes = []
+                for row in episode_cursor.fetchall():
+                    item = dict(zip(episode_cols, row))
+                    for source, target, fallback in (
+                        ("signal_types_json", "signal_types", []),
+                        ("evidence_json", "evidence", {}),
+                    ):
+                        try:
+                            item[target] = json.loads(item.pop(source) or json.dumps(fallback))
+                        except (TypeError, ValueError):
+                            item[target] = fallback
+                    episodes.append(item)
+                return tracklets, episodes
+
+        tracklets, episodes = await _offload(_query)
+        current_episode = next(
+            (episode for episode in episodes
+             if episode["status"] in {"observing", "alerted"}
+             and episode["last_seen_unix"] >= now - 300),
+            None,
+        )
+        return web.json_response({
+            "ts_unix": now, "window_minutes": minutes,
+            "active_tracklets": sum(1 for item in tracklets if item["currently_present"]),
+            "rotating_tracklets": sum(1 for item in tracklets if item["address_count"] > 1),
+            "tracklets": tracklets, "episodes": episodes,
+            "current_episode": current_episode,
+            "limitations": (
+                "Tracklets are short-lived radio-flow correlations, not permanent identities. "
+                "Episode scores combine behaviors and do not identify a person."
+            ),
+        })
 
     async def alert_feedback(self, request: web.Request) -> web.Response:
         aid = request.match_info["aid"]

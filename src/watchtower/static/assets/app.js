@@ -42,6 +42,7 @@ function watchtower() {
     identityMessage: '',
     identityKey: { label: '', key_type: 'fast_pair_account', scope: '*', secret: '' },
     recap: null,
+    presence: { active_tracklets: 0, rotating_tracklets: 0, tracklets: [], episodes: [], current_episode: null },
     recapHours: 8,
     toasts: [],
     _seenAlertIds: new Set(),
@@ -122,7 +123,7 @@ function watchtower() {
         if (tab === 'zones')     tasks.push(this.loadZones());
         if (tab === 'discover')  tasks.push(this.loadDiscovery());
         if (tab === 'findmy')    tasks.push(this.loadFindmy());
-        if (tab === 'overview')  tasks.push(this.loadRecap());
+        if (tab === 'overview')  tasks.push(this.loadRecap(), this.loadPresence());
         if (tab === 'settings' && !this.settingsDirty) tasks.push(this.loadSettings());
         if (tab === 'settings') tasks.push(this.loadWifi(false));
         await Promise.all(tasks);
@@ -389,6 +390,13 @@ function watchtower() {
       } catch (e) { console.warn('loadRecap', e); }
     },
 
+    async loadPresence() {
+      try {
+        const r = await this._fetch('/api/presence?minutes=30', 6000);
+        this.presence = await r.json();
+      } catch (e) { console.warn('loadPresence', e.name); }
+    },
+
     async loadSettings() {
       try {
         const r = await fetch('/api/settings');
@@ -629,6 +637,9 @@ function watchtower() {
         'after_hours_end_utc': 'After-hours end (UTC)',
         'anomaly_severity_high_threshold': 'High-severity score',
         'anomaly_severity_medium_threshold': 'Medium-severity score',
+        'intrusion_episode_window_sec': 'Intrusion correlation window',
+        'intrusion_away_threshold': 'Intrusion score while away',
+        'intrusion_home_threshold': 'Intrusion score while home',
       })[key] || key;
     },
     settingsHint(key) {
@@ -636,6 +647,9 @@ function watchtower() {
         'linger_threshold_sec': 'seconds',
         'anchor_timeout_sec': 'seconds',
         'close_perimeter_rssi_dbm': 'dBm (higher = closer)',
+        'intrusion_episode_window_sec': 'seconds (60-900)',
+        'intrusion_away_threshold': 'score 0-100',
+        'intrusion_home_threshold': 'score 0-100',
         'after_hours_start_utc': 'hour 0–23',
         'after_hours_end_utc': 'hour 0–23',
         'anomaly_severity_high_threshold': '0.0–1.0',
@@ -643,7 +657,7 @@ function watchtower() {
       })[key] || '';
     },
     settingsStep(key) {
-      if (key.includes('threshold') && !key.includes('sec')) return '0.05';
+      if (key.startsWith('anomaly_severity_')) return '0.05';
       return '1';
     },
     ruleLabel(key) {
@@ -658,6 +672,7 @@ function watchtower() {
         'rule_rogue_hotspot':                'Rogue Wi-Fi hotspot',
         'rule_honeypot_engaged':             'Honeypot lure engaged',
         'rule_flipper_zero_detected':        'Flipper Zero detected',
+        'rule_multi_signal_intrusion':       'Multi-signal intrusion episode',
       })[key] || key;
     },
     ruleDescription(key) {
@@ -672,6 +687,7 @@ function watchtower() {
         'rule_rogue_hotspot':                'Random-BSSID Wi-Fi AP with strong signal — phone hotspot near the property.',
         'rule_honeypot_engaged':             'Fires when a device connects to one of our honeypot lures (Tesla key, smart lock, etc.).',
         'rule_flipper_zero_detected':        'High-confidence match on the official Flipper BLE name and serial-service UUID. Does not attribute unrelated sub-GHz traffic.',
+        'rule_multi_signal_intrusion':       'Requires independent radio families plus a decisive interaction signal; shows every contributing signal.',
       })[key] || '';
     },
     findmyKey: null,

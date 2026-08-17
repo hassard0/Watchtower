@@ -30,7 +30,8 @@ def _fake_advertisement(rssi: int = -55, tx_power: int | None = -8,
     a.rssi = rssi
     a.tx_power = tx_power
     a.service_uuids = service_uuids or ["fd6f"]
-    a.manufacturer_data = manufacturer_data or {0x004C: bytes.fromhex("1005")}
+    a.manufacturer_data = ({0x004C: bytes.fromhex("1005")}
+                           if manufacturer_data is None else manufacturer_data)
     a.local_name = local_name
     a.platform_data = ("/org/bluez/hci0/dev_x", {"AddressType": "random"})
     return a
@@ -78,6 +79,32 @@ async def test_ble_scanner_emits_on_advertisement():
     assert e.features.local_name == "iPhone"
     assert e.features.address_type == "random"
     assert e.features.is_random_mac is True
+
+
+async def test_ble_scanner_accepts_advertisement_without_manufacturer_data():
+    received = []
+    with patch("watchtower.scanners.ble.BleakScanner") as MockScanner:
+        instance = MockScanner.return_value
+        instance.start = AsyncMock()
+        instance.stop = AsyncMock()
+        captured = {}
+
+        def _ctor(*args, **kwargs):
+            captured["cb"] = kwargs["detection_callback"]
+            return instance
+
+        MockScanner.side_effect = _ctor
+        scanner = BleScanner()
+        scanner.on_event(received.append)
+        runner = asyncio.create_task(scanner.start())
+        await asyncio.sleep(0.05)
+        captured["cb"](_fake_device(), _fake_advertisement(manufacturer_data={}))
+        await asyncio.sleep(0.05)
+        await scanner.stop()
+        await runner
+
+    assert len(received) == 1
+    assert received[0].features.manufacturer_data_hex is None
 
 
 def test_ble_is_random_mac_detection():

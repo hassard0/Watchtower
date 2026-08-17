@@ -64,6 +64,69 @@ CREATE TABLE IF NOT EXISTS entity_candidates (
 CREATE INDEX IF NOT EXISTS idx_entity_candidates_last_seen
     ON entity_candidates(last_seen_unix);
 
+-- v10: transient anonymous BLE flows and explainable multi-signal episodes.
+-- Tracklets expire quickly and are explicitly not durable device identities.
+CREATE TABLE IF NOT EXISTS presence_tracklets (
+    tracklet_id        TEXT PRIMARY KEY,
+    signature          TEXT NOT NULL,
+    label              TEXT NOT NULL,
+    first_seen_unix    INTEGER NOT NULL,
+    last_seen_unix     INTEGER NOT NULL,
+    observation_count  INTEGER NOT NULL DEFAULT 0,
+    address_count      INTEGER NOT NULL DEFAULT 1,
+    first_rssi         INTEGER,
+    last_rssi          INTEGER,
+    avg_rssi           REAL,
+    max_rssi           INTEGER,
+    state              TEXT NOT NULL DEFAULT 'active',
+    confidence         REAL NOT NULL DEFAULT 0,
+    evidence_json      TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_presence_tracklets_last_seen
+    ON presence_tracklets(last_seen_unix);
+CREATE INDEX IF NOT EXISTS idx_presence_tracklets_signature
+    ON presence_tracklets(signature,last_seen_unix);
+
+CREATE TABLE IF NOT EXISTS presence_tracklet_macs (
+    tracklet_id        TEXT NOT NULL,
+    mac                TEXT NOT NULL,
+    first_seen_unix    INTEGER NOT NULL,
+    last_seen_unix     INTEGER NOT NULL,
+    observation_count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tracklet_id,mac),
+    FOREIGN KEY (tracklet_id) REFERENCES presence_tracklets(tracklet_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_presence_tracklet_macs_mac
+    ON presence_tracklet_macs(mac,last_seen_unix);
+
+CREATE TABLE IF NOT EXISTS intrusion_signals (
+    signal_id      TEXT PRIMARY KEY,
+    ts_unix        INTEGER NOT NULL,
+    bucket         INTEGER NOT NULL,
+    signal_type    TEXT NOT NULL,
+    family         TEXT NOT NULL,
+    source_id      TEXT NOT NULL,
+    weight         REAL NOT NULL,
+    evidence_json  TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(bucket,signal_type,source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_intrusion_signals_ts ON intrusion_signals(ts_unix);
+
+CREATE TABLE IF NOT EXISTS intrusion_episodes (
+    episode_id         TEXT PRIMARY KEY,
+    start_unix         INTEGER NOT NULL,
+    last_seen_unix     INTEGER NOT NULL,
+    status             TEXT NOT NULL,
+    score              INTEGER NOT NULL,
+    severity           TEXT NOT NULL,
+    home_state         TEXT NOT NULL,
+    signal_types_json  TEXT NOT NULL DEFAULT '[]',
+    evidence_json      TEXT NOT NULL DEFAULT '{}',
+    alert_id           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_intrusion_episodes_last_seen
+    ON intrusion_episodes(last_seen_unix);
+
 -- v7: auditable local friendly-name resolution.  Keep every observation so
 -- the selected label can change as better evidence becomes available without
 -- losing provenance.  No protected payloads or stable owner identifiers are
@@ -258,6 +321,6 @@ CREATE TABLE IF NOT EXISTS name_decryption_keys (
 CREATE INDEX IF NOT EXISTS idx_name_decryption_keys_type
     ON name_decryption_keys(key_type, enabled);
 
--- Set schema version to 9 (repeat-confirmed RF identities).
-DELETE FROM schema_meta WHERE version < 9;
-INSERT OR IGNORE INTO schema_meta(version) VALUES (9);
+-- Set schema version to 10 (anonymous presence + intrusion episodes).
+DELETE FROM schema_meta WHERE version < 10;
+INSERT OR IGNORE INTO schema_meta(version) VALUES (10);

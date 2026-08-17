@@ -92,6 +92,7 @@ class LocalSink(Sink):
                 )
         with get_connection(self._db) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            episode_alerts: list[dict] = []
             try:
                 conn.executemany(_INSERT_SQL, rows)
                 if random_ble_entities:
@@ -107,10 +108,22 @@ class LocalSink(Sink):
                            WHERE entity_id = ?""",
                         [(entity_id,) for entity_id in random_ble_entities],
                     )
+                try:
+                    from watchtower.intrusion import process_signal_batch
+                    episode_alerts = process_signal_batch(conn, rows)
+                except Exception:  # noqa: BLE001
+                    # Derived intelligence must never make raw capture lossy.
+                    log.exception("intrusion correlation failed; raw events preserved")
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        for payload in episode_alerts:
+            try:
+                from watchtower.analytics import _dispatch_external, load_settings
+                _dispatch_external(load_settings(self._db), payload)
+            except Exception:  # noqa: BLE001
+                log.exception("intrusion alert dispatch failed; alert remains stored")
 
     async def _periodic_flush(self) -> None:
         try:

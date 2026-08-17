@@ -56,3 +56,23 @@ async def test_scanner_supports_async_callbacks():
 
 def test_scanner_error_is_exception():
     assert issubclass(ScannerError, Exception)
+
+
+async def test_cancelling_start_cleans_up_inner_runner():
+    cleaned = asyncio.Event()
+
+    class CleanupScanner(Scanner):
+        name = ScannerName.BLE
+
+        async def run(self) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+    task = asyncio.create_task(CleanupScanner().start())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned.is_set()

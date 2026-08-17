@@ -39,18 +39,23 @@ class Scanner(ABC):
         self._stop_event.clear()
         runner = asyncio.create_task(self.run())
         stopper = asyncio.create_task(self._stop_event.wait())
-        done, pending = await asyncio.wait(
-            {runner, stopper},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-        if runner in done and runner.exception():
-            raise runner.exception()  # type: ignore[misc]
+        tasks = (runner, stopper)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if runner in done:
+                # Awaiting propagates a real scanner exception to the retry
+                # loop while preserving normal completion.
+                await runner
+        finally:
+            # start() itself is commonly cancelled during service shutdown.
+            # Never orphan the hardware runner or its subprocess in that path.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop(self) -> None:
         self._stop_event.set()

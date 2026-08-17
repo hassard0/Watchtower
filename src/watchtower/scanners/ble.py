@@ -225,7 +225,7 @@ class BleScanner(Scanner):
                 signature = detect_flipper_zero(local_name, services)
                 tracker = detect_location_tracker(local_name, services, service_data, mfr_hex)
                 decoded = {}
-                if mfr_hex.lower().startswith("4c00"):
+                if mfr_hex and mfr_hex.lower().startswith("4c00"):
                     from watchtower.apple_continuity import decode_continuity
                     continuity = decode_continuity(mfr_hex)
                     if continuity:

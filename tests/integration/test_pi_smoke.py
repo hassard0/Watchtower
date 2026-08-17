@@ -59,7 +59,7 @@ def test_db_exists_and_has_schema(pi_host: str):
         "sqlite3 -readonly -cmd '.timeout 5000' "
         "/var/lib/watchtower/watchtower.db 'SELECT version FROM schema_meta;'",
     )
-    assert out.strip() == "8"  # current schema includes encrypted name-key storage
+    assert out.strip() == "10"  # transient presence and multi-signal episode tables
 
 
 def _sqlite_count(host: str, scanner: str) -> int:

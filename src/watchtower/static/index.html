@@ -553,19 +553,46 @@ tailwind.config = {
             <div class="text-base font-semibold">Discover &amp; enroll</div>
             <div class="text-[11px] text-slate-500">All eligible enrollment candidates, ranked by identity confidence</div>
           </div>
-          <button @click="loadDiscovery()" class="text-[10px] text-signal-glow hover:text-signal-pulse">refresh</button>
+          <div class="text-right">
+            <button @click="loadDiscovery(true)" :disabled="discoveryLoading"
+                    class="text-[10px] text-signal-glow hover:text-signal-pulse disabled:opacity-40"
+                    x-text="discoveryLoading ? 'refreshing…' : 'refresh now'"></button>
+            <div class="text-[9px] text-slate-600" x-text="discoveryCacheLabel()"></div>
+          </div>
         </div>
         <div class="text-xs text-slate-400 leading-relaxed">
           <span class="text-anchor font-medium">Anchor</span> = your phone, defines &quot;home&quot;. <span class="text-satellite font-medium">Satellite</span> = your watch / earbuds / kids' phone. <span class="text-guest font-medium">Known guest</span> = recurring visitor. <span class="text-threat font-medium">Untrusted</span> = a device you don't want here.
         </div>
         <div class="text-[10px] text-slate-500 mt-2">
-          Showing <span class="num text-slate-300" x-text="visibleDiscoveryCandidates().length"></span>
-          of <span class="num text-slate-300" x-text="discoveryEligibleCount"></span> eligible unclassified entities.
+          Cached <span class="num text-slate-300" x-text="discoveryCandidates.length"></span> candidates;
+          <span class="num text-slate-300" x-text="discoveryFiltered.length"></span> match the filters and
+          <span class="num text-slate-300" x-text="visibleDiscoveryCandidates().length"></span> are currently rendered.
           Eligibility requires activity within seven days plus 50 observations, strong name evidence, or an Apple grouped signal.
           Classified and lower-evidence records remain under Entities.
         </div>
-        <input x-model="discoverySearch" placeholder="filter candidates by name, ID, vendor, or signal type"
-               class="mt-3 w-full bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-3 py-2 focus:outline-none focus:border-signal-glow/40">
+        <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+          <input x-model.debounce.150ms="discoverySearch" placeholder="name, ID, vendor, type"
+                 class="lg:col-span-2 bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-3 py-2 focus:outline-none focus:border-signal-glow/40">
+          <select x-model="discoverySource" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option value="all">all radios</option><option value="ble_scanner">BLE</option>
+            <option value="wifi_scanner">Wi-Fi</option><option value="lan_discovery">LAN</option>
+            <option value="subghz_scanner">Sub-GHz</option><option value="midband_scanner">Mid-band</option>
+          </select>
+          <select x-model="discoveryNamed" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option value="all">named + unnamed</option><option value="named">named only</option><option value="unnamed">unnamed only</option>
+          </select>
+          <select x-model.number="discoveryMinObservations" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2 py-2">
+            <option :value="0">any observations</option><option :value="100">100+ observations</option>
+            <option :value="1000">1,000+ observations</option><option :value="10000">10,000+ observations</option>
+          </select>
+        </div>
+        <div class="mt-2 flex items-center justify-end gap-2">
+          <span class="text-[9px] uppercase tracking-wider text-slate-600">sort</span>
+          <select x-model="discoverySort" class="bg-ink-700/60 border border-ink-600/40 rounded-md text-[10px] px-2 py-1">
+            <option value="rank">best identity</option><option value="recent">most recent</option>
+            <option value="observations">most observed</option><option value="anomaly">most anomalous</option><option value="name">name</option>
+          </select>
+        </div>
       </div>
 
       <!-- skeleton when first loading Discover -->
@@ -630,6 +657,11 @@ tailwind.config = {
           </div>
         </template>
         <div x-show="visibleDiscoveryCandidates().length === 0" class="text-xs text-slate-500 text-center py-12 glass rounded-xl">no matching candidates — clear the filter or let the system observe longer</div>
+      </div>
+      <div x-show="visibleDiscoveryCandidates().length < discoveryFiltered.length" class="glass rounded-xl p-3 flex items-center justify-center gap-3">
+        <span class="text-[10px] text-slate-500 num" x-text="visibleDiscoveryCandidates().length + ' of ' + discoveryFiltered.length + ' rendered'"></span>
+        <button @click="showMoreDiscovery(false)" class="text-xs px-3 py-1.5 rounded border border-signal-glow/40 text-signal-glow">show 100 more</button>
+        <button @click="showMoreDiscovery(true)" class="text-xs px-3 py-1.5 rounded border border-ink-600/40 text-slate-300">show all</button>
       </div>
     </section>
 

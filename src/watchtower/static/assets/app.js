@@ -1,4 +1,8 @@
 // Watchtower dashboard logic. Alpine.js component.
+const DISCOVERY_CACHE_KEY = 'watchtower.discovery.v2';
+const DISCOVERY_REFRESH_MS = 60 * 1000;
+const DISCOVERY_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+
 function watchtower() {
   return {
     state: { entities: {}, scanners: [], baseline_progress: {}, alerts_unack_24h: 0 },
@@ -10,8 +14,18 @@ function watchtower() {
     alerts: [],
     visits: [],
     discoveryCandidates: [],
+    discoveryFiltered: [],
     discoveryEligibleCount: 0,
     discoverySearch: '',
+    discoverySource: 'all',
+    discoveryNamed: 'all',
+    discoveryMinObservations: 0,
+    discoverySort: 'rank',
+    discoveryRenderLimit: 100,
+    discoveryFetchedAt: 0,
+    discoveryCacheState: 'empty',
+    discoveryLoading: false,
+    _discoveryFetchPromise: null,
     discoveryProbing: {},
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
@@ -106,9 +120,16 @@ function watchtower() {
         if (saved && this.tabs.find(t => t.id === saved)) this.tab = saved;
       } catch (e) {}
       try { this.wifiToken = sessionStorage.getItem('watchtower.wifiToken') || ''; } catch (e) {}
+      this.restoreDiscoveryCache();
       this.$watch('tab', v => {
         try { localStorage.setItem('watchtower.tab', v); } catch (e) {}
       });
+      for (const key of [
+        'discoverySearch', 'discoverySource', 'discoveryNamed',
+        'discoveryMinObservations', 'discoverySort',
+      ]) {
+        this.$watch(key, () => this.applyDiscoveryFilters());
+      }
       this.refresh();
       setInterval(() => { this.tick(); }, 1000);
       setInterval(() => { this.refresh(); }, 5000);
@@ -394,22 +415,109 @@ function watchtower() {
       } catch (e) { console.warn('loadZones', e); }
     },
 
-    async loadDiscovery() {
+    restoreDiscoveryCache() {
       try {
-        const r = await fetch('/api/discovery');
-        const j = await r.json();
-        this.discoveryCandidates = j.candidates || [];
-        this.discoveryEligibleCount = Number(j.eligible_count ?? this.discoveryCandidates.length);
+        const cached = JSON.parse(localStorage.getItem(DISCOVERY_CACHE_KEY) || 'null');
+        const age = Date.now() - Number(cached?.fetched_at || 0);
+        if (!cached || cached.version !== 2 || !Array.isArray(cached.candidates)
+            || age < 0 || age > DISCOVERY_CACHE_MAX_AGE_MS) return;
+        this.discoveryCandidates = cached.candidates;
+        this.discoveryEligibleCount = Number(cached.eligible_count ?? cached.candidates.length);
+        this.discoveryFetchedAt = Number(cached.fetched_at);
+        this.discoveryCacheState = 'cached';
+        this.applyDiscoveryFilters();
         this.tabsLoaded = { ...this.tabsLoaded, discover: true };
-      } catch (e) { console.warn('loadDiscovery', e); }
+      } catch (e) {
+        try { localStorage.removeItem(DISCOVERY_CACHE_KEY); } catch (_ignored) {}
+      }
+    },
+
+    saveDiscoveryCache() {
+      try {
+        localStorage.setItem(DISCOVERY_CACHE_KEY, JSON.stringify({
+          version: 2, fetched_at: this.discoveryFetchedAt,
+          eligible_count: this.discoveryEligibleCount,
+          candidates: this.discoveryCandidates,
+        }));
+      } catch (e) {
+        console.warn('discovery cache unavailable', e.name);
+      }
+    },
+
+    async loadDiscovery(force = false) {
+      const fresh = this.discoveryCandidates.length > 0
+        && (Date.now() - this.discoveryFetchedAt) < DISCOVERY_REFRESH_MS;
+      if (!force && fresh) {
+        this.tabsLoaded = { ...this.tabsLoaded, discover: true };
+        return;
+      }
+      if (this._discoveryFetchPromise) return this._discoveryFetchPromise;
+      this.discoveryLoading = true;
+      this._discoveryFetchPromise = (async () => {
+        try {
+          const r = await this._fetch('/api/discovery', 10000);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          this.discoveryCandidates = j.candidates || [];
+          this.discoveryEligibleCount = Number(j.eligible_count ?? this.discoveryCandidates.length);
+          this.discoveryFetchedAt = Date.now();
+          this.discoveryCacheState = 'live';
+          this.applyDiscoveryFilters(false);
+          this.saveDiscoveryCache();
+          this.tabsLoaded = { ...this.tabsLoaded, discover: true };
+        } catch (e) {
+          if (this.discoveryCandidates.length) this.discoveryCacheState = 'stale';
+          console.warn('loadDiscovery', e);
+        } finally {
+          this.discoveryLoading = false;
+          this._discoveryFetchPromise = null;
+        }
+      })();
+      return this._discoveryFetchPromise;
+    },
+
+    applyDiscoveryFilters(resetRenderLimit = true) {
+      const q = this.discoverySearch.trim().toLowerCase();
+      const minObs = Number(this.discoveryMinObservations || 0);
+      let rows = this.discoveryCandidates.filter(c => {
+        if (this.discoverySource !== 'all' && c.scanner !== this.discoverySource) return false;
+        const named = Boolean(c.friendly_name);
+        if (this.discoveryNamed === 'named' && !named) return false;
+        if (this.discoveryNamed === 'unnamed' && named) return false;
+        if (Number(c.total_observations || 0) < minObs) return false;
+        return !q || [this.entityDisplayName(c), c.entity_id, c.vendor, c.kind, c.scanner]
+          .some(value => String(value || '').toLowerCase().includes(q));
+      });
+      const sorters = {
+        rank: (a, b) => Number(b.candidacy_score || 0) - Number(a.candidacy_score || 0),
+        recent: (a, b) => Number(b.last_seen_unix || 0) - Number(a.last_seen_unix || 0),
+        observations: (a, b) => Number(b.total_observations || 0) - Number(a.total_observations || 0),
+        anomaly: (a, b) => Number(b.anomaly_score || 0) - Number(a.anomaly_score || 0),
+        name: (a, b) => this.entityDisplayName(a).localeCompare(this.entityDisplayName(b)),
+      };
+      rows = [...rows].sort(sorters[this.discoverySort] || sorters.rank);
+      this.discoveryFiltered = rows;
+      if (resetRenderLimit) {
+        this.discoveryRenderLimit = 100;
+      } else {
+        this.discoveryRenderLimit = Math.max(100, Math.min(this.discoveryRenderLimit, rows.length));
+      }
     },
 
     visibleDiscoveryCandidates() {
-      const q = this.discoverySearch.trim().toLowerCase();
-      if (!q) return this.discoveryCandidates;
-      return this.discoveryCandidates.filter(c => [
-        this.entityDisplayName(c), c.entity_id, c.vendor, c.kind, c.scanner,
-      ].some(value => String(value || '').toLowerCase().includes(q)));
+      return this.discoveryFiltered.slice(0, this.discoveryRenderLimit);
+    },
+
+    showMoreDiscovery(all = false) {
+      this.discoveryRenderLimit = all
+        ? this.discoveryFiltered.length
+        : Math.min(this.discoveryFiltered.length, this.discoveryRenderLimit + 100);
+    },
+
+    discoveryCacheLabel() {
+      if (!this.discoveryFetchedAt) return 'not cached';
+      const age = this.relTime(Math.floor(this.discoveryFetchedAt / 1000));
+      return `${this.discoveryCacheState} · updated ${age}`;
     },
 
     async loadRecap() {
@@ -765,7 +873,7 @@ function watchtower() {
         const j = await r.json();
         this.discoveryProbed = { ...this.discoveryProbed, [c.entity_id]: j.result };
         if (j.result?.ok) {
-          await this.loadDiscovery();
+          await this.loadDiscovery(true);
           await this.loadEntities();
         }
       } catch (e) {
@@ -782,7 +890,7 @@ function watchtower() {
           body: JSON.stringify({ classification }),
         });
         c.classification = classification;
-        await this.loadDiscovery();
+        await this.loadDiscovery(true);
         await this.loadEntities();
         await this.loadState();
       } catch (e) { console.warn('quickClassify', e); }

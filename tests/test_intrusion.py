@@ -143,8 +143,9 @@ def test_ble_symptoms_do_not_stack_or_alert_with_hotspot_alone(tmp_path: Path):
             for i in range(4)
         ]
         wifi = {
-            "mac": "a6:6a:bb:e6:9f:f5", "ssid": "Visitor hotspot",
+            "mac": "a6:6a:bb:e6:9f:f5", "local_name": "Visitor hotspot",
             "rssi": -45, "is_random_mac": True,
+            "decoded": {"ssid": "Visitor hotspot"},
         }
         wifi_row = _row("wifi-1", base + 16, "wifi_scanner", "wifi_beacon", wifi)
         # The local sink stores raw events before deriving signals.
@@ -170,8 +171,9 @@ def test_repeated_randomized_hotspot_is_not_intrusion_evidence(tmp_path: Path):
     init_db(db)
     base = 43200
     wifi = {
-        "mac": "a6:6a:bb:e6:9f:f5", "ssid": "Known local hotspot",
+        "mac": "a6:6a:bb:e6:9f:f5", "local_name": "Known local hotspot",
         "rssi": -40, "is_random_mac": True,
+        "decoded": {"ssid": "Known local hotspot"},
     }
     old_row = _row("wifi-old", base - 3600, "wifi_scanner", "wifi_beacon", wifi)
     new_row = _row("wifi-new", base, "wifi_scanner", "wifi_beacon", wifi)

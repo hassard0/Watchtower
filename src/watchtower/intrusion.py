@@ -334,7 +334,11 @@ def _collect_signals(conn, events: list[dict[str, Any]], tracklets: list[dict[st
             except (TypeError, ValueError):
                 rssi = -127
             mac = str(features.get("mac") or "").lower()
-            ssid = _clean_text(features.get("ssid"))
+            ssid = _clean_text(
+                features.get("ssid")
+                or features.get("local_name")
+                or decoded.get("ssid")
+            )
             # Locally administered BSSIDs are also used by ordinary APs and
             # phone hotspots.  Count one only while it is genuinely new to
             # this sensor; a strong, repeatedly observed local AP is context,

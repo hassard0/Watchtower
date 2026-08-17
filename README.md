@@ -359,7 +359,7 @@ take effect immediately without restart.
 | `findmy_persistent_tracker` | The same unclassified tracker cluster has been present for ≥ `findmy_persistent_min_minutes_per_day` (default 180 min) on each of the last `findmy_persistent_min_consecutive_days` (default 3) days |
 | `first_time_visitor_after_hours` | New entity first-seen between `after_hours_start_utc` and `after_hours_end_utc` (default 22:00-06:00 UTC). Requires at least one anchor enrolled so a fresh setup doesn't blast alerts |
 | `close_unknown_signal` | Unknown BLE entity with avg RSSI > `close_perimeter_rssi_dbm` (default −50 dBm) and recurring presence (skips stationary IoT) |
-| `rogue_hotspot` | Wi-Fi AP with locally-administered (random) BSSID and strong signal — the smell test for a phone hotspot or rogue access point near the property |
+| `rogue_hotspot` | Named AP beacon with a locally-administered BSSID that is genuinely new, repeats, and is stronger than −55 dBm. Established APs and the Watchtower recovery SSID are excluded |
 | `honeypot_engaged` | Inbound GATT connection to the Pi's lure name |
 | `flipper_zero_detected` | Official `Flipper <device-name>` BLE format and 0x3080–0x3083 serial-service UUID appear together. Name-only matches are informational to avoid easy spoofing |
 | `multi_signal_intrusion` | At least two independent signal families occur in a five-minute episode, the context-adjusted score crosses its threshold, and one signal is decisive (key-fob/garage traffic, honeypot contact, or high-confidence Flipper detection). Multiple BLE symptoms never stack as independent evidence |
@@ -374,8 +374,8 @@ dashboard banner color and (when configured) the ntfy push priority.
 | Tab | What you see |
 | --- | --- |
 | **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), explainable presence episodes and short-lived anonymous BLE flows, live RF radar with RSSI as radial distance, top anomalies, scanner activity bars, baseline learning progress, and the "entropy of the room" envelope plot |
-| **Discover** | Auto-suggested enrollment candidates ranked by stability. One-tap classify into Anchor / Satellite / Known guest / Untrusted. Active **GATT probe** button asks the device for its name in real time. |
-| **Entities** | Sortable, filterable table of every tracked entity with anomaly bars and regularity meters. Each row shows source antenna + frequency band ("BLE 2.4 GHz", "Wi-Fi 2.4 GHz", "Sub-GHz 433 MHz", "RF 915 MHz") and IEEE OUI vendor when known. |
+| **Discover** | Ranked enrollment queue containing the top 30 recent, unclassified candidates that have repeated observations, strong name evidence, or an Apple grouped signal. One-tap classify into Anchor / Satellite / Known guest / Untrusted. |
+| **Entities** | Searchable, paged inventory of tracked radio identities with explicit “showing X of Y” counts, anomaly bars, and regularity meters. Each row shows source antenna + frequency band and IEEE OUI vendor when known. |
 | **Timeline** | 1 h / 6 h / 24 h / 3 d / 7 d scrubbable visit timeline, color-coded by classification and anomaly score |
 | **Spectrum** | Live energy waterfall per band (HF / FM / VHF / NOAA / Keyfob-303 / Keyfob-315 / TPMS-345 / Garage-390 / EU-Keyfob-418 / ISM-433 / FRS-GMRS / EU-SRD-868 / ISM-902 / Cellular-850 / LTE-700 / ADS-B / GPS / Sat-DL …), plus the protocol-decode log for any sub-GHz traffic the live + offline rtl_433 caught |
 | **Find-My** | Live observer table (rotating MACs in the last 5 min), stable cluster list with co-presence-inferred owners, owned-tracker catalog with paste-master-secret enrollment, daily presence chart |

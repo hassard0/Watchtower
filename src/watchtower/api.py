@@ -547,7 +547,9 @@ class ApiServer:
 
     async def entities(self, request: web.Request) -> web.Response:
         order = request.query.get("order", "active")
-        limit = int(request.query.get("limit", "200"))
+        limit = max(1, min(1000, int(request.query.get("limit", "200"))))
+        offset = max(0, int(request.query.get("offset", "0")))
+        search = request.query.get("q", "").strip()[:100]
         scope = request.query.get("scope", "all")  # all|active|anomalous|unknown|enrolled
         now = int(time.time())
         order_sql = {
@@ -566,10 +568,25 @@ class ApiServer:
             "unknown": "classification IS NULL",
             "enrolled": "classification IS NOT NULL",
         }.get(scope, "1=1")
+        where_sql = scope_where
+        where_params: list[Any] = []
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            needle = f"%{escaped}%"
+            where_sql = (
+                f"({scope_where}) AND (entity_id LIKE ? ESCAPE '\\' "
+                "OR COALESCE(friendly_name,'') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(vendor,'') LIKE ? ESCAPE '\\')"
+            )
+            where_params.extend((needle, needle, needle))
         db_path = self._db
 
         def _query():
             with get_connection(db_path) as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM entities WHERE {where_sql}",
+                    where_params,
+                ).fetchone()[0]
                 cursor = conn.execute(f"""
                     SELECT entity_id, scanner, kind, friendly_name,
                            friendly_name_source, friendly_name_confidence,
@@ -578,13 +595,13 @@ class ApiServer:
                            avg_rssi, min_rssi, max_rssi, regularity, anomaly_score,
                            vendor, is_random_mac
                     FROM entities
-                    WHERE {scope_where}
+                    WHERE {where_sql}
                     ORDER BY {order_sql}
-                    LIMIT ?
-                """, (limit,))
-                return [_row_to_dict(cursor, r) for r in cursor.fetchall()]
+                    LIMIT ? OFFSET ?
+                """, (*where_params, limit, offset))
+                return [_row_to_dict(cursor, r) for r in cursor.fetchall()], total
 
-        rows = await _offload(_query)
+        rows, total = await _offload(_query)
         for r in rows:
             r["seconds_since_seen"] = now - (r["last_seen_unix"] or 0)
             # 300 s window instead of 120 s. Analytics step occasionally takes
@@ -594,7 +611,10 @@ class ApiServer:
             # is wide enough to absorb routine lag while still being "current"
             # by any practical definition.
             r["currently_present"] = r["seconds_since_seen"] < 300
-        return web.json_response({"entities": rows, "ts_unix": now})
+        return web.json_response({
+            "entities": rows, "total": total, "limit": limit, "offset": offset,
+            "scope": scope, "query": search, "ts_unix": now,
+        })
 
     async def entity_detail(self, request: web.Request) -> web.Response:
         eid = request.match_info["eid"]
@@ -1728,6 +1748,17 @@ class ApiServer:
         now = int(time.time())
         with get_connection(self._db) as conn:
             # Surface entities with consistent presence and unknown classification.
+            eligibility_sql = """
+                classification IS NULL
+                AND last_seen_unix > ?
+                AND (total_observations >= 50
+                     OR COALESCE(friendly_name_confidence, 0) >= 0.90
+                     OR entity_id LIKE 'ble:apple:%')
+            """
+            eligible_count = conn.execute(
+                f"SELECT COUNT(*) FROM entities WHERE {eligibility_sql}",
+                (now - 7 * 86400,),
+            ).fetchone()[0]
             cursor = conn.execute("""
                 SELECT entity_id, scanner, kind, friendly_name,
                        friendly_name_source, friendly_name_confidence, vendor,
@@ -1750,4 +1781,7 @@ class ApiServer:
         for c in candidates:
             _discovery_candidate_score(c, lan_macs)
         candidates.sort(key=lambda c: c["candidacy_score"], reverse=True)
-        return web.json_response({"candidates": candidates[:30], "lan_macs": list(lan_macs)})
+        return web.json_response({
+            "candidates": candidates[:30], "eligible_count": eligible_count,
+            "limit": 30, "lan_macs": list(lan_macs),
+        })

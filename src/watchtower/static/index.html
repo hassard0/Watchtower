@@ -551,12 +551,18 @@ tailwind.config = {
           </div>
           <div class="flex-1">
             <div class="text-base font-semibold">Discover &amp; enroll</div>
-            <div class="text-[11px] text-slate-500">Devices we keep seeing — mark them so the system knows what's normal</div>
+            <div class="text-[11px] text-slate-500">Ranked enrollment queue — not the complete entity inventory</div>
           </div>
           <button @click="loadDiscovery()" class="text-[10px] text-signal-glow hover:text-signal-pulse">refresh</button>
         </div>
         <div class="text-xs text-slate-400 leading-relaxed">
           <span class="text-anchor font-medium">Anchor</span> = your phone, defines &quot;home&quot;. <span class="text-satellite font-medium">Satellite</span> = your watch / earbuds / kids' phone. <span class="text-guest font-medium">Known guest</span> = recurring visitor. <span class="text-threat font-medium">Untrusted</span> = a device you don't want here.
+        </div>
+        <div class="text-[10px] text-slate-500 mt-2">
+          Shows the top <span class="num text-slate-300" x-text="discoveryCandidates.length"></span>
+          of <span class="num text-slate-300" x-text="discoveryEligibleCount"></span> eligible unclassified entities.
+          Eligibility requires activity within seven days plus 50 observations, strong name evidence, or an Apple grouped signal.
+          Classified and lower-evidence records remain under Entities.
         </div>
       </div>
 
@@ -1059,13 +1065,22 @@ tailwind.config = {
         <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Filter</div>
         <template x-for="s in scopeBtns" :key="s.id">
           <button class="seg-btn px-3 py-1.5 rounded-md text-xs font-medium border border-ink-600/40 text-slate-400 hover:text-slate-200"
-                  :data-active="entityScope === s.id" @click="entityScope = s.id; loadEntities()">
+                  :data-active="entityScope === s.id" @click="entityScope = s.id; entityOffset = 0; loadEntities()">
             <span x-text="s.label"></span>
           </button>
         </template>
         <div class="flex-1"></div>
+        <input x-model="entitySearch" @input.debounce.350ms="entityOffset = 0; loadEntities()"
+               placeholder="search name, ID, vendor"
+               class="w-48 bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2.5 py-1.5 focus:outline-none focus:border-signal-glow/40">
+        <div class="text-[10px] text-slate-500 num"
+             x-text="entityTotal ? 'showing ' + (entityOffset + 1) + '–' + Math.min(entityOffset + entities.length, entityTotal) + ' of ' + entityTotal : 'showing 0'"></div>
+        <button @click="entityPage(-1)" :disabled="entityOffset === 0"
+                class="text-xs px-2 py-1 rounded border border-ink-600/40 disabled:opacity-30">←</button>
+        <button @click="entityPage(1)" :disabled="entityOffset + entities.length >= entityTotal"
+                class="text-xs px-2 py-1 rounded border border-ink-600/40 disabled:opacity-30">→</button>
         <div class="text-xs uppercase tracking-widest text-slate-500 mr-2">Sort</div>
-        <select x-model="entityOrder" @change="loadEntities()"
+        <select x-model="entityOrder" @change="entityOffset = 0; loadEntities()"
                 class="bg-ink-700/60 border border-ink-600/40 rounded-md text-xs px-2.5 py-1.5 focus:outline-none focus:border-signal-glow/40">
           <option value="active">most recent</option>
           <option value="anomaly">anomaly score</option>

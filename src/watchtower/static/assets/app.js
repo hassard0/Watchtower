@@ -3,9 +3,14 @@ function watchtower() {
   return {
     state: { entities: {}, scanners: [], baseline_progress: {}, alerts_unack_24h: 0 },
     entities: [],
+    entityTotal: 0,
+    entityOffset: 0,
+    entityLimit: 300,
+    entitySearch: '',
     alerts: [],
     visits: [],
     discoveryCandidates: [],
+    discoveryEligibleCount: 0,
     discoveryProbing: {},
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
@@ -163,9 +168,16 @@ function watchtower() {
 
     async loadEntities() {
       try {
-        const r = await this._fetch(`/api/entities?scope=${this.entityScope}&order=${this.entityOrder}&limit=300`, 6000);
+        const query = new URLSearchParams({
+          scope: this.entityScope, order: this.entityOrder,
+          limit: String(this.entityLimit), offset: String(this.entityOffset),
+          q: this.entitySearch,
+        });
+        const r = await this._fetch(`/api/entities?${query}`, 6000);
         const j = await r.json();
         const incoming = j.entities || [];
+        this.entityTotal = Number(j.total ?? incoming.length);
+        this.entityOffset = Number(j.offset ?? this.entityOffset);
         // Don't blow away a previously-good entity list with a momentarily
         // empty response — that caused the radar to flicker between
         // populated and "no signals" on every refresh tick during analytics
@@ -182,6 +194,13 @@ function watchtower() {
         }
         this.tabsLoaded = { ...this.tabsLoaded, entities: true };
       } catch (e) { console.warn('loadEntities', e.name); }
+    },
+
+    entityPage(delta) {
+      const next = Math.max(0, this.entityOffset + delta * this.entityLimit);
+      if (next >= this.entityTotal && delta > 0) return;
+      this.entityOffset = next;
+      this.loadEntities();
     },
 
     async loadAlerts() {
@@ -378,6 +397,7 @@ function watchtower() {
         const r = await fetch('/api/discovery');
         const j = await r.json();
         this.discoveryCandidates = j.candidates || [];
+        this.discoveryEligibleCount = Number(j.eligible_count ?? this.discoveryCandidates.length);
         this.tabsLoaded = { ...this.tabsLoaded, discover: true };
       } catch (e) { console.warn('loadDiscovery', e); }
     },

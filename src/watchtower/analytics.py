@@ -278,10 +278,19 @@ def _entity_id_for(ev_features: dict, scanner: str, kind: str) -> str | None:
         mac = ev_features.get("mac")
         if not mac:
             return None
-        # WiFi probe requests use random MACs heavily — same logic as BLE.
-        if ev_features.get("is_random_mac") is False:
+        # An AP beacon's BSSID is its useful stable radio identity, including
+        # when the U/L bit is set (mesh nodes and phone hotspots commonly do
+        # this). Client probe requests rotate addresses heavily, so only that
+        # event kind falls back to the requested SSID.
+        if kind != "wifi_probe_request" or ev_features.get("is_random_mac") is False:
             return f"wifi:mac:{mac.lower()}"
-        ssid = (ev_features.get("ssid") or "").strip()
+        decoded = ev_features.get("decoded") or {}
+        ssid = str(
+            ev_features.get("ssid")
+            or ev_features.get("local_name")
+            or decoded.get("ssid")
+            or ""
+        ).strip()
         if ssid:
             return f"wifi:ssid:{ssid}"
         return None
@@ -1280,23 +1289,31 @@ class Analytics:
                         ),
                     })
 
-        # ---- Rule 6: rogue hotspot — randomized-MAC WiFi BSSID with strong signal ----
+        # ---- Rule 6: newly arrived randomized-BSSID Wi-Fi hotspot ----
         if not S["rule_rogue_hotspot"]:
             return
         rogue_wifi = conn.execute(
-            """SELECT entity_id, avg_rssi, friendly_name
+            """SELECT entity_id, avg_rssi, friendly_name, first_seen_unix,
+                      total_observations
                FROM entities
                WHERE entity_id LIKE 'wifi:mac:%'
                  AND is_random_mac = 1
-                 AND avg_rssi IS NOT NULL AND avg_rssi > -65
-                 AND last_seen_unix > ?
+                 AND avg_rssi IS NOT NULL AND avg_rssi > -55
+                 AND first_seen_unix > ? AND last_seen_unix > ?
+                 AND total_observations >= 2
+                 AND lower(COALESCE(friendly_name,'')) != 'watchtower'
                  AND classification IS NULL""",
-            (now - 300,),
+            (now - 300, now - 300),
         ).fetchall()
-        for entity_id, avg_rssi, name in rogue_wifi:
-            _fire("rogue_hotspot", "medium", entity_id, 0.5, {
+        for entity_id, avg_rssi, name, first_seen, observations in rogue_wifi:
+            _fire("rogue_hotspot", "medium", entity_id, 0.55, {
                 "avg_rssi": avg_rssi,
                 "ssid": name,
-                "explanation": "A random-BSSID Wi-Fi AP with strong signal — looks like a phone hotspot "
-                               "or rogue AP very close to the property.",
+                "first_seen_unix": first_seen,
+                "observation_count": observations,
+                "limitation": "A randomized BSSID can be a benign phone hotspot or locally administered AP.",
+                "explanation": (
+                    "A named randomized-BSSID Wi-Fi AP appeared for the first time, "
+                    "repeated, and has a very strong nearby signal."
+                ),
             })

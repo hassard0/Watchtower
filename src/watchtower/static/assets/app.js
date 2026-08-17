@@ -5,12 +5,13 @@ function watchtower() {
     entities: [],
     entityTotal: 0,
     entityOffset: 0,
-    entityLimit: 300,
+    entityLimit: 1000,
     entitySearch: '',
     alerts: [],
     visits: [],
     discoveryCandidates: [],
     discoveryEligibleCount: 0,
+    discoverySearch: '',
     discoveryProbing: {},
     discoveryProbed: {},
     spectrum: { midband_samples: [], subghz_decodes: [], stale: false, window_sec: 300 },
@@ -56,7 +57,7 @@ function watchtower() {
     loading: false,
     now: '',
     tab: 'overview',
-    entityScope: 'active',
+    entityScope: 'recent',
     entityOrder: 'active',
     timelineHours: 24,
 
@@ -73,11 +74,12 @@ function watchtower() {
     ],
 
     scopeBtns: [
+      { id: 'recent',     label: 'Recent 7d' },
       { id: 'active',     label: 'Active now' },
       { id: 'anomalous',  label: 'Anomalous' },
       { id: 'unknown',    label: 'Unknown' },
       { id: 'enrolled',   label: 'Enrolled' },
-      { id: 'all',        label: 'All' },
+      { id: 'all',        label: 'All history' },
     ],
 
     windowBtns: [
@@ -400,6 +402,14 @@ function watchtower() {
         this.discoveryEligibleCount = Number(j.eligible_count ?? this.discoveryCandidates.length);
         this.tabsLoaded = { ...this.tabsLoaded, discover: true };
       } catch (e) { console.warn('loadDiscovery', e); }
+    },
+
+    visibleDiscoveryCandidates() {
+      const q = this.discoverySearch.trim().toLowerCase();
+      if (!q) return this.discoveryCandidates;
+      return this.discoveryCandidates.filter(c => [
+        this.entityDisplayName(c), c.entity_id, c.vendor, c.kind, c.scanner,
+      ].some(value => String(value || '').toLowerCase().includes(q)));
     },
 
     async loadRecap() {

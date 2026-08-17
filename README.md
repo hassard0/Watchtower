@@ -374,8 +374,8 @@ dashboard banner color and (when configured) the ntfy push priority.
 | Tab | What you see |
 | --- | --- |
 | **Overview** | Hero state (CALM / WATCHING / EYES UP / SETUP / AWAY · QUIET), explainable presence episodes and short-lived anonymous BLE flows, live RF radar with RSSI as radial distance, top anomalies, scanner activity bars, baseline learning progress, and the "entropy of the room" envelope plot |
-| **Discover** | Ranked enrollment queue containing the top 30 recent, unclassified candidates that have repeated observations, strong name evidence, or an Apple grouped signal. One-tap classify into Anchor / Satellite / Known guest / Untrusted. |
-| **Entities** | Searchable, paged inventory of tracked radio identities with explicit “showing X of Y” counts, anomaly bars, and regularity meters. Each row shows source antenna + frequency band and IEEE OUI vendor when known. |
+| **Discover** | Complete ranked enrollment queue of recent, unclassified candidates that have repeated observations, strong name evidence, or an Apple grouped signal, with local filtering and one-tap classification. |
+| **Entities** | Searchable, paged inventory that defaults to every identity seen in the last seven days. Active Now and All History remain explicit filters; “showing X of Y” prevents hidden caps. |
 | **Timeline** | 1 h / 6 h / 24 h / 3 d / 7 d scrubbable visit timeline, color-coded by classification and anomaly score |
 | **Spectrum** | Live energy waterfall per band (HF / FM / VHF / NOAA / Keyfob-303 / Keyfob-315 / TPMS-345 / Garage-390 / EU-Keyfob-418 / ISM-433 / FRS-GMRS / EU-SRD-868 / ISM-902 / Cellular-850 / LTE-700 / ADS-B / GPS / Sat-DL …), plus the protocol-decode log for any sub-GHz traffic the live + offline rtl_433 caught |
 | **Find-My** | Live observer table (rotating MACs in the last 5 min), stable cluster list with co-presence-inferred owners, owned-tracker catalog with paste-master-secret enrollment, daily presence chart |

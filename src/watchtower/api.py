@@ -550,7 +550,7 @@ class ApiServer:
         limit = max(1, min(1000, int(request.query.get("limit", "200"))))
         offset = max(0, int(request.query.get("offset", "0")))
         search = request.query.get("q", "").strip()[:100]
-        scope = request.query.get("scope", "all")  # all|active|anomalous|unknown|enrolled
+        scope = request.query.get("scope", "recent")  # recent|active|anomalous|unknown|enrolled|all
         now = int(time.time())
         order_sql = {
             "active": "last_seen_unix DESC",
@@ -561,6 +561,7 @@ class ApiServer:
         }.get(order, "last_seen_unix DESC")
         scope_where = {
             "all": "1=1",
+            "recent": "last_seen_unix > strftime('%s','now') - 604800",
             # 300 s matches the widened `currently_present` window — see the
             # comment near `r["currently_present"] = ...` below.
             "active": "last_seen_unix > strftime('%s','now') - 300",
@@ -1773,7 +1774,6 @@ class ApiServer:
                        OR entity_id LIKE 'ble:apple:%')
                 ORDER BY (COALESCE(friendly_name_confidence, 0) >= 0.90) DESC,
                          total_observations DESC
-                LIMIT 300
             """, (now - 7 * 86400,))
             candidates = [_row_to_dict(cursor, r) for r in cursor.fetchall()]
 
@@ -1782,6 +1782,6 @@ class ApiServer:
             _discovery_candidate_score(c, lan_macs)
         candidates.sort(key=lambda c: c["candidacy_score"], reverse=True)
         return web.json_response({
-            "candidates": candidates[:30], "eligible_count": eligible_count,
-            "limit": 30, "lan_macs": list(lan_macs),
+            "candidates": candidates, "eligible_count": eligible_count,
+            "limit": None, "lan_macs": list(lan_macs),
         })

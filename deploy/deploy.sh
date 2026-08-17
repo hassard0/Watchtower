@@ -40,10 +40,13 @@ ssh "$USER_@$HOST" "sudo cp $APP_DIR/deploy/$SVC /etc/systemd/system/$SVC && \
 echo "[+] installing durable Wi-Fi recovery"
 ssh "$USER_@$HOST" "bash $APP_DIR/deploy/install-wifi-recovery.sh"
 
-echo "[+] (re)starting service"
-ssh "$USER_@$HOST" "sudo systemctl restart $SVC"
+echo "[+] installing private HTTPS and (re)starting service"
+ssh "$USER_@$HOST" "bash $APP_DIR/deploy/install-https.sh"
 sleep 3
 ssh "$USER_@$HOST" "systemctl is-active $SVC && \
+  systemctl is-active nginx.service && \
+  curl --fail --silent --show-error --cacert /etc/watchtower/tls/watchtower-ca.crt \
+    --resolve watchtower.local:443:127.0.0.1 https://watchtower.local/api/health && \
   sudo journalctl -u $SVC -n 30 --no-pager"
 
 echo "[+] deployed."

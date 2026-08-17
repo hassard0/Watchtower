@@ -73,3 +73,10 @@ def test_missing_section_uses_defaults(tmp_path: Path):
 def test_load_config_missing_file_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "no.toml")
+
+
+def test_deployment_example_keeps_plain_http_on_loopback():
+    example = Path(__file__).parents[1] / "config" / "watchtower.example.toml"
+    cfg = load_config(example)
+    assert cfg.api.host == "127.0.0.1"
+    assert cfg.api.port == 8080

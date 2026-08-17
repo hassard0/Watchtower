@@ -13,8 +13,10 @@ level = "INFO"
 format = "json"
 
 [api]
-host = "0.0.0.0"
-port = 80
+# nginx exposes HTTPS on 443 and redirects HTTP on 80. Keep the application
+# socket loopback-only so unencrypted API traffic never crosses the LAN.
+host = "127.0.0.1"
+port = 8080
 
 [scanners.ble]
 enabled = true

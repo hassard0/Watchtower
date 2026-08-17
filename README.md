@@ -98,7 +98,7 @@ DETECTION     7 declarative rules, all toggleable + tunable from the dashboard.
               Each fires an Alert with structured evidence.
 
 OUTPUT        SQLite (WAL mode, 64 MB cache, 256 MB mmap) with hourly pruner
-              aiohttp /api/* + static SPA at port 80
+              loopback aiohttp + private-CA HTTPS on 443; port 80 redirects
               optional ntfy push, generic webhook, and MQTT publish per alert
 ```
 
@@ -369,7 +369,7 @@ dashboard banner color and (when configured) the ntfy push priority.
 
 ---
 
-## The dashboard on port 80
+## The private-HTTPS dashboard
 
 | Tab | What you see |
 | --- | --- |
@@ -457,10 +457,12 @@ ssh admin@watchtower.local "bash" < deploy/pi-setup.sh
 sudo reboot   # to apply the DVB-driver blacklist
 ```
 
-Installs `bluez`, `rtl-sdr`, `rtl-433`, `iw`, `sqlite3`; blacklists
+Installs `bluez`, `rtl-sdr`, `rtl-433`, `iw`, `sqlite3`, and `nginx`; blacklists
 the kernel DVB drivers so RTL-SDR can claim the dongles; installs
 udev rules for non-root SDR access; adds `admin` to the `bluetooth`
-and `plugdev` groups; creates the watchtower data directories.
+and `plugdev` groups; creates the watchtower data directories. The HTTPS
+installer creates a stable private CA under `/etc/watchtower/tls`, serves
+the dashboard on 443, and keeps port 80 as a redirect/bootstrap endpoint.
 
 ### Develop on your host
 
@@ -491,7 +493,11 @@ systemctl is-active watchtower
 sudo journalctl -u watchtower -f
 ```
 
-Open `http://watchtower.local` in a browser.
+Download `http://watchtower.local/watchtower-ca.crt` and install it as a
+trusted root certificate on each device you control. Then open
+`https://watchtower.local/`. The CA private key never leaves the Pi; its
+public certificate is also available from Settings. The leaf certificate
+is refreshed automatically when the Pi's LAN addresses change.
 
 ### Network and boot recovery
 

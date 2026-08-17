@@ -28,13 +28,31 @@ def test_service_active(pi_host: str):
     assert out.strip() == "active"
 
 
-def test_dashboard_served_on_port_80(pi_host: str):
+def test_port_80_redirects_to_https(pi_host: str):
+    out = _ssh(
+        pi_host,
+        "curl --silent --show-error --output /dev/null "
+        "--write-out '%{http_code} %{redirect_url}' "
+        "http://watchtower.local/",
+    )
+    assert out.strip() == "308 https://watchtower.local/"
+
+
+def test_https_dashboard_uses_private_ca(pi_host: str):
     out = _ssh(
         pi_host,
         "curl --fail --silent --show-error --output /dev/null "
-        "--write-out '%{http_code}' http://127.0.0.1/",
+        "--write-out '%{http_code}' "
+        "--cacert /etc/watchtower/tls/watchtower-ca.crt "
+        "--resolve watchtower.local:443:127.0.0.1 "
+        "https://watchtower.local/api/health",
     )
     assert out.strip() == "200"
+
+
+def test_certificate_refresh_timer_active(pi_host: str):
+    out = _ssh(pi_host, "systemctl is-active watchtower-cert-refresh.timer")
+    assert out.strip() == "active"
 
 
 def test_wifi_recovery_timer_active(pi_host: str):

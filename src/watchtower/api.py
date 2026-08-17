@@ -1,7 +1,7 @@
 """HTTP API + dashboard server.
 
-Embedded in the watchtower process as an asyncio task. Listens on
-0.0.0.0:80 by default. Serves:
+Embedded in the watchtower process as an asyncio task. The deployment binds
+it to 127.0.0.1:8080 behind the private-HTTPS nginx endpoint. Serves:
   - JSON API at /api/*
   - Static SPA dashboard at /
   - Mobile probe UI at /probe

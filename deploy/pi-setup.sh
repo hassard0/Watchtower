@@ -12,7 +12,7 @@ sudo apt-get install -y --no-install-recommends \
   rtl-sdr librtlsdr-dev rtl-433 \
   sqlite3 \
   build-essential pkg-config \
-  rsync git curl iw network-manager dnsmasq-base openssl
+  rsync git curl iw network-manager dnsmasq-base openssl nginx
 
 echo "[+] Ensuring core services are enabled at boot..."
 # bluetooth + NetworkManager are dependencies of watchtower.service.
@@ -73,6 +73,11 @@ sudo chmod 0644 /etc/profile.d/watchtower-admin-path.sh
 echo "[+] Installing durable Wi-Fi recovery..."
 if [ -f "$SCRIPT_DIR/install-wifi-recovery.sh" ]; then
   bash "$SCRIPT_DIR/install-wifi-recovery.sh"
+fi
+
+echo "[+] Installing private HTTPS endpoint..."
+if [ -f "$SCRIPT_DIR/install-https.sh" ] && [ -f /etc/watchtower/watchtower.toml ]; then
+  bash "$SCRIPT_DIR/install-https.sh"
 fi
 
 echo "[+] Done. Verify with: rtl_test -t (must reload modules / reboot if blacklist was new)"

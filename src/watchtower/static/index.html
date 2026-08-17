@@ -1283,6 +1283,24 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- PRIVATE HTTPS -->
+      <div class="glass rounded-2xl p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div class="text-[10px] uppercase tracking-widest text-slate-500">Transport security</div>
+            <div class="text-base font-semibold">Private HTTPS</div>
+            <div class="text-[11px] text-slate-500 mt-1 max-w-3xl">
+              Traffic is encrypted on port 443. Install this Watchtower's private CA once on each trusted phone or computer to remove the browser warning, then use <span class="font-mono text-slate-300">https://watchtower.local/</span>.
+            </div>
+          </div>
+          <a href="/watchtower-ca.crt" download="watchtower-ca.crt"
+             class="shrink-0 text-center px-3 py-2 rounded-md border border-signal-glow/40 text-signal-glow text-xs">
+            download CA certificate
+          </a>
+        </div>
+        <div class="text-[10px] text-slate-600 mt-2">The CA private key stays root-only on the Pi. Port 80 serves only this public CA download and HTTPS redirects.</div>
+      </div>
+
       <!-- WI-FI -->
       <div class="glass rounded-2xl p-5">
         <div class="flex items-start justify-between gap-3 mb-4">

@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep Watchtower TLS certificate aligned with LAN addresses
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
